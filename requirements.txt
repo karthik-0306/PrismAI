@@ -1,0 +1,35 @@
+# PrismAI — Python backend dependencies
+# Install with: pip install -r requirements.txt
+# Python 3.11 required (matches ai_env)
+#
+# IMPORTANT: litellm==1.89.1 has strict sub-dependency requirements.
+# Do NOT hard-pin tiktoken, httpx, or pydantic to versions below what litellm needs:
+#   tiktoken >= 0.8.0
+#   httpx    >= 0.28.0
+#   pydantic >= 2.10.0
+# These three are listed WITHOUT version pins so pip resolves them against litellm's constraints.
+
+# ── Web framework ────────────────────────────────────
+fastapi==0.111.1
+uvicorn[standard]==0.30.1
+
+# ── LLM abstraction ──────────────────────────────────
+litellm==1.89.1
+
+# ── Database (async SQLite driver) ───────────────────
+aiosqlite==0.20.0
+
+# ── Token counting — litellm requires >=0.8.0 ────────
+tiktoken
+
+# ── HTTP client — litellm requires >=0.28.0 ──────────
+httpx
+
+# ── Env var loading ──────────────────────────────────
+python-dotenv==1.0.1
+
+# ── Numeric ops (cosine similarity for rewriter) ─────
+numpy==1.26.4
+
+# ── Data validation — litellm requires >=2.10.0 ──────
+pydantic
