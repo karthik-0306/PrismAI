@@ -28,8 +28,11 @@ httpx
 # ── Env var loading ──────────────────────────────────
 python-dotenv==1.0.1
 
-# ── Numeric ops (cosine similarity for rewriter) ─────
-numpy==1.26.4
+# ── Local embeddings (sentence-transformers) ─────────
+# Runs fully locally — no API key, no quota, no network dependency.
+# Downloads model on first run (~90MB for all-MiniLM-L6-v2).
+# numpy is pulled in automatically as a sub-dependency.
+sentence-transformers>=3.0.0
 
 # ── Data validation — litellm requires >=2.10.0 ──────
 pydantic

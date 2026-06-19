@@ -131,4 +131,28 @@ async def initialize_database() -> None:
 
         await db.commit()  # persist the CREATE TABLE statements
 
+        # ── Schema migrations — run after every startup, idempotent ─────────
+        # SQLite has no ALTER TABLE ... ADD COLUMN IF NOT EXISTS syntax.
+        # We catch OperationalError (column already exists) and move on silently.
+        # Add new columns here when the schema evolves; never remove old ones.
+
+        try:
+            await db.execute(
+                "ALTER TABLE messages ADD COLUMN models_used_json TEXT"
+            )
+            await db.commit()
+            logger.info("Migration applied: messages.models_used_json column added.")
+        except Exception:
+            pass
+
+        try:
+            await db.execute("ALTER TABLE messages ADD COLUMN original_tokens INTEGER DEFAULT 0")
+            await db.execute("ALTER TABLE messages ADD COLUMN rewritten_tokens INTEGER DEFAULT 0")
+            await db.execute("ALTER TABLE messages ADD COLUMN reduction_pct REAL DEFAULT 0.0")
+            await db.commit()
+            logger.info("Migration applied: token metric columns added.")
+        except Exception:
+            # Columns already exist
+            pass
+
     logger.info("Database initialised successfully.")

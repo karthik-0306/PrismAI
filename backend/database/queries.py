@@ -11,6 +11,7 @@ Rules enforced in this file:
      The orchestrator and pipeline modules handle logic.
 """
 
+import json
 import logging
 from typing import Optional, List
 from backend.database.connection import get_db       # the connection context manager
@@ -86,6 +87,10 @@ async def save_message(
     token_count: int,
     model_used: Optional[str] = None,
     route_category: Optional[str] = None,
+    models_used: Optional[List[str]] = None,
+    original_tokens: int = 0,
+    rewritten_tokens: int = 0,
+    reduction_pct: float = 0.0,
 ) -> None:
     """
     Insert a single message (user or assistant turn) into the messages table.
@@ -98,18 +103,29 @@ async def save_message(
         content:        The text of the message.
         token_count:    Estimated token count (from token_counter.py).
         model_used:     LiteLLM model string (None for user messages).
+                        For compound responses, set to 'aggregated'.
         route_category: Router classification result (None for user messages).
+                        For compound responses, stored as CSV e.g. 'dsa,math'.
+        models_used:    Full list of model strings that contributed to this response.
+                        e.g. ['groq/openai/gpt-oss-120b', 'groq/qwen/qwen3-32b'].
+                        Serialized to JSON for storage. None for user messages.
     Returns: None
     Side effects: Writes one row to messages.
     """
+    # Serialize the models list to a compact JSON string for storage.
+    # None → stored as NULL in the DB (user messages, pre-migration rows).
+    models_json: Optional[str] = json.dumps(models_used) if models_used else None
+
     async with get_db() as db:
         await db.execute(
             """
             INSERT INTO messages
-                (message_id, chat_id, role, content, model_used, route_category, token_count)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                (message_id, chat_id, role, content, model_used, route_category,
+                 token_count, models_used_json, original_tokens, rewritten_tokens, reduction_pct)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (message_id, chat_id, role, content, model_used, route_category, token_count)
+            (message_id, chat_id, role, content, model_used, route_category,
+             token_count, models_json, original_tokens, rewritten_tokens, reduction_pct)
         )
         await db.commit()
     logger.debug("Saved %s message %s in chat %s", role, message_id, chat_id)
@@ -131,7 +147,8 @@ async def get_chat_messages(chat_id: str) -> List[Message]:
         cursor = await db.execute(
             """
             SELECT message_id, chat_id, role, content, model_used,
-                   route_category, token_count, is_summarized, created_at
+                   route_category, token_count, is_summarized, created_at,
+                   models_used_json, original_tokens, rewritten_tokens, reduction_pct
             FROM messages
             WHERE chat_id = ?
             ORDER BY created_at ASC
@@ -151,6 +168,11 @@ async def get_chat_messages(chat_id: str) -> List[Message]:
             token_count=row["token_count"],
             is_summarized=bool(row["is_summarized"]),  # SQLite stores 0/1, convert to bool
             created_at=row["created_at"],
+            # Deserialize JSON list; fall back to None for legacy rows (column is NULL)
+            models_used_json=row["models_used_json"],
+            original_tokens=row["original_tokens"] if "original_tokens" in row.keys() else 0,
+            rewritten_tokens=row["rewritten_tokens"] if "rewritten_tokens" in row.keys() else 0,
+            reduction_pct=row["reduction_pct"] if "reduction_pct" in row.keys() else 0.0,
         )
         for row in rows
     ]
@@ -170,7 +192,8 @@ async def get_unsummarized_messages(chat_id: str) -> List[Message]:
         cursor = await db.execute(
             """
             SELECT message_id, chat_id, role, content, model_used,
-                   route_category, token_count, is_summarized, created_at
+                   route_category, token_count, is_summarized, created_at,
+                   models_used_json
             FROM messages
             WHERE chat_id = ? AND is_summarized = 0
             ORDER BY created_at ASC
@@ -190,6 +213,7 @@ async def get_unsummarized_messages(chat_id: str) -> List[Message]:
             token_count=row["token_count"],
             is_summarized=bool(row["is_summarized"]),
             created_at=row["created_at"],
+            models_used_json=row["models_used_json"],
         )
         for row in rows
     ]

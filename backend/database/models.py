@@ -36,10 +36,17 @@ class Message:
     role: str                   # 'user' or 'assistant'
     content: str                # raw text of the message
     model_used: Optional[str]   # LiteLLM model string, None for user messages
-    route_category: Optional[str]  # e.g. 'dsa', 'coding', None for user messages
+    route_category: Optional[str]  # e.g. 'dsa', 'dsa,math', None for user messages
     token_count: int            # estimated token count of this message's content
     is_summarized: bool         # True once this message has been rolled into a summary
     created_at: str             # ISO-8601 timestamp string
+    # JSON-serialized list of all models that contributed to this response.
+    # e.g. '["groq/openai/gpt-oss-120b","groq/qwen/qwen3-32b"]'
+    # None for user messages and rows that predate this column (schema migration v2).
+    models_used_json: Optional[str] = None
+    original_tokens: int = 0
+    rewritten_tokens: int = 0
+    reduction_pct: float = 0.0
 
 
 @dataclass

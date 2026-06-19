@@ -1,172 +1,679 @@
 """
-backend/pipeline/orchestrator.py
+backend/pipeline/orchestrator.py  (Phase 3 — Full Rewrite)
 
 The central coordinator for every user request.
 
-The orchestrator is the ONLY file that knows the full pipeline sequence.
-Every other module (memory, rewriter, router, LLM client, subagents) is isolated
-and has no knowledge of what runs before or after it.
+Phase 3 pipeline (5 steps):
 
-Phase 1 pipeline:
-  1. Ensure chat exists in DB (create if new)
-  2. Save user message to DB
-  3. Build prompt with memory (last 3 messages)
-  4. Call Gemini Flash (primary general model)
-  5. Save assistant response to DB
-  6. Return result to the router
+  Step 1 — Resolve/create chat + save user message to DB
 
-Phases 2-6 will each add one step to this pipeline without touching other modules.
+  Step 2 — Route decision:
+    a) MANUAL MODE  (model_preference != "auto"):
+         Skip router, skip splitting, skip judging.
+         Call the chosen model directly with the full query.
+         Return response immediately.
+
+    b) AUTO MODE — single intent (router returns 1 sub-query):
+         Dispatch sub-query to its ROUTE_MAP model.
+         Judge the response (severity 0/1/2 = accept, 3 = retry).
+         Return response directly (no aggregation step).
+
+    c) AUTO MODE — compound intent (router returns 2+ sub-queries):
+         Dispatch all sub-queries in parallel (asyncio.gather).
+         Judge each response in parallel.
+         Retry any severity-3 failures (corrected sub-query → same model, once).
+         Aggregate all accepted responses into one final reply.
+
+  Step 3 — Save assistant response to DB
+  Step 4 — Return OrchestratorResult to HTTP router
+
+Hard limits:
+  - Max 2 calls to any expensive model per sub-task (original + 1 retry).
+  - No second judgment after a retry — retry result is always accepted.
 """
 
+import asyncio
+import json
 import logging
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import List, Optional, Tuple
 
-from backend.database import queries            # DB read/write operations
-from backend.llm.client import LLMClient, get_fallbacks_for_route  # LLM abstraction
-from backend.pipeline.memory import MemoryInjector               # prompt builder
-from backend.utils.session import generate_id                    # UUID generator
-from backend.utils.token_counter import count_tokens             # token estimation
+from backend.database import queries
+from backend.llm.client import LLMClient
+from backend.pipeline.memory import MemoryInjector
+from backend.pipeline.router import SmartRouter
+from backend.pipeline.rewriter import QueryRewriter, RewriteResult
+from backend.utils.session import generate_id
+from backend.utils.token_counter import count_tokens
 
 logger = logging.getLogger(__name__)
 
-# ── Module-level singletons — created once, reused on every request ───────────
-# These are stateless — safe to share across concurrent async requests.
-_llm_client = LLMClient()
-_memory = MemoryInjector()
+# ─────────────────────────────────────────────────────────────────────────────
+# MODEL ROUTING TABLE
+# Maps each category to a primary model + two fallback models.
+# The LLMClient tries them in order automatically.
+# ─────────────────────────────────────────────────────────────────────────────
+ROUTE_MAP = {
+    "dsa":       {"primary": "groq/openai/gpt-oss-120b",       "fallback_1": "groq/qwen/qwen3-32b",          "fallback_2": "gemini/gemini-3.5-flash"},
+    "coding":    {"primary": "groq/qwen/qwen3-32b",            "fallback_1": "groq/openai/gpt-oss-120b",     "fallback_2": "gemini/gemini-3.5-flash"},
+    "reasoning": {"primary": "groq/openai/gpt-oss-120b",       "fallback_1": "groq/llama-3.3-70b-versatile", "fallback_2": "gemini/gemini-3.5-flash"},
+    "math":      {"primary": "groq/openai/gpt-oss-120b",       "fallback_1": "groq/qwen/qwen3-32b",          "fallback_2": "gemini/gemini-3.5-flash"},
+    "summarize": {"primary": "gemini/gemini-3.5-flash",        "fallback_1": "groq/llama-3.1-8b-instant",    "fallback_2": "groq/llama-3.3-70b-versatile"},
+    "fast":      {"primary": "groq/llama-3.1-8b-instant",      "fallback_1": "gemini/gemini-3.5-flash",      "fallback_2": "groq/llama-3.3-70b-versatile"},
+    "general":   {"primary": "gemini/gemini-3.5-flash",        "fallback_1": "groq/llama-3.3-70b-versatile", "fallback_2": "groq/llama-3.1-8b-instant"},
+}
 
+# Priority order: cheapest/fastest first, most capable last.
+# All models are listed so that if the entire Groq service is down,
+# Gemini picks it up, and vice versa. Nothing is left unprotected.
+UTILITY_PRIMARY   = "gemini/gemini-3.5-flash"
+UTILITY_FALLBACKS = [
+    "groq/llama-3.1-8b-instant",
+    "groq/llama-3.3-70b-versatile",     # stronger than 8b, still cheap on Groq
+    "groq/qwen/qwen3-32b",              # strong reasoning, good JSON compliance
+    "groq/openai/gpt-oss-120b",         # most capable — last resort for internal tasks
+]
+
+# ── Manual mode fallback pool — all available models sorted best-to-cheapest
+# When a user manually selects a model and it fails, we try the rest in this order.
+# The chosen model is excluded at runtime so it is never called twice.
+# The user always sees which model ACTUALLY responded via model_used in the response.
+ALL_MODELS_BY_QUALITY = [
+    "groq/openai/gpt-oss-120b",
+    "groq/qwen/qwen3-32b",
+    "groq/llama-3.3-70b-versatile",
+    "gemini/gemini-3.5-flash",
+    "groq/llama-3.1-8b-instant",
+]
+
+# ── Module-level singletons — stateless, safe to share across async requests ──
+_llm_client = LLMClient()
+_memory     = MemoryInjector()
+_router     = SmartRouter()
+_rewriter   = QueryRewriter()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RESULT DATACLASS
+# ─────────────────────────────────────────────────────────────────────────────
 
 @dataclass
 class OrchestratorResult:
     """
-    Typed return value from Orchestrator.run().
-    The chat router unpacks this and returns it as the HTTP response body.
+    Everything the HTTP router (chat.py) needs to build the API response.
     """
-    response: str              # the assistant's reply text (think-tags stripped)
-    model_used: str            # LiteLLM string of the model that produced the response
-    chat_id: str               # UUID4 — the conversation this message belongs to
-    message_id: str            # UUID4 — the assistant's message row in the DB
-    route_category: str        # e.g. "general" — which ROUTE_MAP bucket was used
-    eval_score: Optional[float] = None  # Phase 6: evaluator score (None until then)
+    response:        str               # Final reply text shown to the user
+    model_used:      str               # Primary model (or "aggregated" if compound)
+    chat_id:         str               # UUID4 of the conversation
+    message_id:      str               # UUID4 of the saved assistant message row
+    route_category:  str               # e.g. "dsa" | "dsa,math" | "manual" | "general"
+    categories_used: List[str]         # All categories that were dispatched
+    models_used:     List[str]         # All model strings used to produce sub-responses
+    original_tokens: int = 0           # Phase 2 metrics
+    rewritten_tokens: int = 0          # Phase 2 metrics
+    reduction_pct:   float = 0.0       # Phase 2 metrics
+    eval_score:      Optional[float] = None  # Phase 6 placeholder — always None here
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ORCHESTRATOR CLASS
+# ─────────────────────────────────────────────────────────────────────────────
 
 class Orchestrator:
     """
     Coordinates the full request-response pipeline for one user message.
-
-    Instantiated once per request (or reused as a singleton — stateless).
-    All state lives in the DB and is re-fetched each turn.
+    Stateless — a single instance handles all concurrent requests safely.
     """
 
     async def run(
         self,
-        session_id: str,
-        chat_id: Optional[str],
-        message: str,
-        model_preference: str = "auto",
+        session_id:        str,
+        chat_id:           Optional[str],
+        message:           str,
+        model_preference:  str = "auto",
+        rewriter_enabled:  bool = True,
     ) -> OrchestratorResult:
         """
-        Execute the Phase 1 pipeline for one user message.
+        Execute the Phase 3 pipeline for one user message.
 
         Args:
             session_id:       UUID4 string — the browser's session identifier.
             chat_id:          UUID4 string of an existing chat, or None to start a new one.
             message:          The user's raw input text.
-            model_preference: "auto" uses ROUTE_MAP general; any other string is
-                              a manual model override (Phase 3 feature, accepted here
-                              but always uses auto in Phase 1).
+            model_preference: "auto" uses the smart router; any other string is a manual
+                              model override that bypasses routing entirely.
+            rewriter_enabled: If True, the query rewriter runs FIRST regardless of
+                              auto/manual mode. Phase 2 will hook rewriter.rewrite() here.
+                              In Phase 3 (no rewriter built yet), this flag is accepted
+                              but has no effect — the rewriter slot is reserved.
         Returns:
-            OrchestratorResult: all data the router needs to form the HTTP response.
-        Raises:
-            LLMError: propagated from LLMClient if all models fail.
+            OrchestratorResult with the final response and all metadata.
         """
-        # ── Step 1: Resolve or create the chat ──────────────────────────────
-        is_new_chat = chat_id is None
-        if is_new_chat:
-            # Generate a fresh UUID4 for this new conversation thread
+
+        # ── Step 1: Resolve or create chat ─────────────────────────────────
+        if chat_id is None:
             chat_id = generate_id()
-            # Use first 6 words of the user's message as the sidebar title
-            title = self._make_title(message)
+            title   = self._make_title(message)
             await queries.save_chat(chat_id, session_id, title)
             logger.info("Created new chat %s for session %s", chat_id, session_id)
 
-        # ── Step 2: Save the user's message to DB ───────────────────────────
-        user_message_id = generate_id()
+        # Save the user's message to DB before doing anything else
+        user_message_id  = generate_id()
         user_token_count = count_tokens(message)
-
         await queries.save_message(
             message_id=user_message_id,
             chat_id=chat_id,
             role="user",
             content=message,
             token_count=user_token_count,
-            # model_used and route_category are None for user messages
         )
         logger.debug("Saved user message %s (%d tokens)", user_message_id, user_token_count)
 
-        # ── Step 3: Build the prompt with conversation history ───────────────
-        # MemoryInjector fetches last 3 messages + prepends system message
-        # current_query is appended last by build_prompt
+        # ── PHASE 2 REWRITER HOOK ──────────────────────────────────────────────
+        # The rewriter compresses the query using the 70B model before
+        # anything else happens.
+        if rewriter_enabled:
+            logger.info("Running query rewriter on user message...")
+            rewrite_result = await _rewriter.rewrite(message)
+            query_to_use = rewrite_result.rewritten_query
+        else:
+            logger.info("Rewriter disabled for this request.")
+            rewrite_result = None
+            query_to_use = message
+        # ───────────────────────────────────────────────────────────────────
+
+        # ── Step 2a: MANUAL MODE — user chose a specific model ───────────────────
+        if model_preference != "auto":
+            return await self._run_manual(
+                chat_id=chat_id,
+                message=query_to_use,
+                model=model_preference,
+                rewrite_result=rewrite_result,
+            )
+
+        # ── Step 2b/c: AUTO MODE — classify intent, dispatch, judge, aggregate
+        return await self._run_auto(
+            chat_id=chat_id,
+            message=query_to_use,
+            rewrite_result=rewrite_result,
+        )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # MANUAL MODE
+    # ─────────────────────────────────────────────────────────────────────────
+
+    async def _run_manual(
+        self,
+        chat_id: str,
+        message: str,
+        model:   str,
+        rewrite_result: Optional[RewriteResult] = None,
+    ) -> OrchestratorResult:
+        """
+        User explicitly chose a model — skip all routing, splitting, and judging.
+        Build the prompt with conversation history and call the chosen model.
+
+        Fallback behavior: if the chosen model fails, we try ALL other available
+        models in quality order (best-to-cheapest). The user always sees which model
+        ACTUALLY responded via model_used in the response — no silent surprises.
+
+        Note: If rewriter_enabled=True, the query was already rewritten before
+        reaching this method (Phase 2 will handle that in the run() method above).
+
+        Args:
+            chat_id: UUID4 of the conversation.
+            message: The user's input (raw in Phase 3, rewritten in Phase 2+).
+            model:   The LiteLLM model string chosen by the user.
+        Returns:
+            OrchestratorResult with route_category="manual".
+        """
+        logger.info("Manual mode: calling %s (with full fallback chain)", model)
+
+        # Build fallback list: all models EXCEPT the one already being tried as primary
+        # This prevents calling the same model twice if it fails
+        fallbacks = [m for m in ALL_MODELS_BY_QUALITY if m != model]
+
+        # Build prompt: system + last-3-history + current message
         prompt = await _memory.build_prompt(chat_id=chat_id, current_query=message)
 
-        # ── Step 4: Choose model and call the LLM ───────────────────────────
-        # Phase 1: always use "general" route regardless of model_preference.
-        # Phase 3 will implement the smart router and manual override.
-        route_category = "general"
-        primary_model, fallback_models = get_fallbacks_for_route(route_category)
+        # Gemini 3+ models need temperature=1.0 to avoid infinite loop warnings
+        temperature = _get_temperature(model)
 
         result = await _llm_client.async_complete(
-            model=primary_model,
+            model=model,
             messages=prompt,
-            fallback_models=fallback_models,
-            temperature=0.7,
+            fallback_models=fallbacks,  # full quality-ordered fallback chain
+            temperature=temperature,
             max_tokens=2048,
         )
 
-        logger.info(
-            "LLM response received from %s | %d tokens out",
-            result.model_used, result.completion_tokens
-        )
-
-        # ── Step 5: Save the assistant's response to DB ─────────────────────
+        # Save assistant response to DB
         assistant_message_id = generate_id()
-        assistant_token_count = count_tokens(result.content, model=result.model_used)
-
         await queries.save_message(
             message_id=assistant_message_id,
             chat_id=chat_id,
             role="assistant",
             content=result.content,
-            token_count=assistant_token_count,
+            token_count=count_tokens(result.content, model=result.model_used),
             model_used=result.model_used,
-            route_category=route_category,
-        )
-        logger.debug(
-            "Saved assistant message %s (%d tokens)", assistant_message_id, assistant_token_count
+            route_category="manual",
+            models_used=[result.model_used],  # always one model in manual mode
         )
 
-        # ── Step 6: Return structured result to the router ──────────────────
         return OrchestratorResult(
             response=result.content,
             model_used=result.model_used,
             chat_id=chat_id,
             message_id=assistant_message_id,
-            route_category=route_category,
-            eval_score=None,  # Phase 6 will populate this
+            route_category="manual",
+            categories_used=["manual"],
+            models_used=[result.model_used],
+            original_tokens=rewrite_result.original_tokens if rewrite_result else count_tokens(message),
+            rewritten_tokens=rewrite_result.rewritten_tokens if rewrite_result else count_tokens(message),
+            reduction_pct=rewrite_result.reduction_pct if rewrite_result else 0.0,
         )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # AUTO MODE
+    # ─────────────────────────────────────────────────────────────────────────
+
+    async def _run_auto(
+        self,
+        chat_id: str,
+        message: str,
+        rewrite_result: Optional[RewriteResult] = None,
+    ) -> OrchestratorResult:
+        """
+        Auto mode pipeline:
+          1. Router classifies query → list of {category, sub_query} dicts
+          2. Dispatch single or compound
+          3. Judge each response
+          4. Retry severity-3 failures
+          5. Aggregate if compound, return directly if single
+
+        Args:
+            chat_id: UUID4 of the conversation.
+            message: The user's raw input (Phase 3 — no rewriter yet).
+        Returns:
+            OrchestratorResult with full routing metadata.
+        """
+        # ── Classify + split ────────────────────────────────────────────────
+        sub_queries = await _router.classify_and_split(message)
+        logger.info(
+            "Router produced %d sub-task(s): %s",
+            len(sub_queries), [s["category"] for s in sub_queries]
+        )
+
+        # ── Dispatch all sub-queries in parallel ────────────────────────────
+        # asyncio.gather runs all dispatch coroutines concurrently.
+        # Each call returns (response_text, model_used_string).
+        dispatch_tasks = [
+            self._dispatch(sq["sub_query"], sq["category"], chat_id)
+            for sq in sub_queries
+        ]
+        dispatch_results: List[Tuple[str, str]] = await asyncio.gather(*dispatch_tasks)
+
+        # ── Judge all responses in parallel ─────────────────────────────────
+        judge_tasks = [
+            self._judge(sq["sub_query"], response)
+            for sq, (response, _) in zip(sub_queries, dispatch_results)
+        ]
+        judgments = await asyncio.gather(*judge_tasks)
+
+        # ── Retry any severity-3 failures ───────────────────────────────────
+        # Build the final list of (response, model_used) after retries.
+        final_results: List[Tuple[str, str]] = []
+
+        for i, (judgment, (response, model_used)) in enumerate(zip(judgments, dispatch_results)):
+            sq = sub_queries[i]
+
+            if judgment["severity"] == 3:
+                logger.warning(
+                    "Severity 3 for category '%s': %s — triggering resplit+retry",
+                    sq["category"], judgment["reason"]
+                )
+                # Resplit the sub-query and call the model once more
+                response, model_used = await self._resplit_and_retry(
+                    original_query=message,
+                    failed_sub_query=sq["sub_query"],
+                    failure_reason=judgment["reason"],
+                    category=sq["category"],
+                    chat_id=chat_id,
+                )
+            else:
+                logger.debug(
+                    "Severity %d for category '%s' — accepted immediately",
+                    judgment["severity"], sq["category"]
+                )
+
+            final_results.append((response, model_used))
+
+        # ── Single intent: return directly (no aggregation) ─────────────────
+        if len(sub_queries) == 1:
+            final_response = final_results[0][0]
+            final_model    = final_results[0][1]
+            route_category = sub_queries[0]["category"]
+            categories_used = [route_category]
+            models_used     = [final_model]
+
+        # ── Compound intent: aggregate all responses into one reply ──────────
+        else:
+            sub_responses = [
+                {
+                    "category":  sub_queries[i]["category"],
+                    "sub_query": sub_queries[i]["sub_query"],
+                    "response":  final_results[i][0],
+                }
+                for i in range(len(sub_queries))
+            ]
+            final_response  = await self._aggregate(message, sub_responses)
+            categories_used = [sq["category"] for sq in sub_queries]
+            models_used     = [r[1] for r in final_results]
+            # Compound route_category is stored as comma-separated string (Option B)
+            route_category  = ",".join(categories_used)
+            final_model     = "aggregated"
+
+        # ── Save assistant response to DB ────────────────────────────────────
+        assistant_message_id = generate_id()
+        await queries.save_message(
+            message_id=assistant_message_id,
+            chat_id=chat_id,
+            role="assistant",
+            content=final_response,
+            token_count=count_tokens(final_response),
+            model_used=final_model,
+            route_category=route_category,
+            models_used=models_used,  # persist the full list so history can rebuild badges
+        )
+
+        logger.info(
+            "Pipeline complete | categories=%s | models=%s | route=%s",
+            categories_used, models_used, route_category
+        )
+
+        return OrchestratorResult(
+            response=final_response,
+            model_used=final_model,
+            chat_id=chat_id,
+            message_id=assistant_message_id,
+            route_category=route_category,
+            categories_used=categories_used,
+            models_used=models_used,
+            original_tokens=rewrite_result.original_tokens if rewrite_result else count_tokens(message),
+            rewritten_tokens=rewrite_result.rewritten_tokens if rewrite_result else count_tokens(message),
+            reduction_pct=rewrite_result.reduction_pct if rewrite_result else 0.0,
+        )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # PRIVATE HELPERS
+    # ─────────────────────────────────────────────────────────────────────────
+
+    async def _dispatch(
+        self,
+        sub_query: str,
+        category:  str,
+        chat_id:   str,
+    ) -> Tuple[str, str]:
+        """
+        Call the correct specialized model for a single sub-query.
+
+        Picks the primary model from ROUTE_MAP[category], with two automatic fallbacks.
+        Builds the full prompt including conversation history via MemoryInjector.
+
+        Args:
+            sub_query: The specific sub-task text to answer.
+            category:  One of the 7 route categories — used to pick the model.
+            chat_id:   UUID4 — needed to fetch conversation history from DB.
+        Returns:
+            Tuple[str, str]: (response_text, model_used_string)
+        """
+        # Pick the model chain for this category
+        models = ROUTE_MAP.get(category, ROUTE_MAP["general"])
+        primary   = models["primary"]
+        fallbacks = [models["fallback_1"], models["fallback_2"]]
+
+        # Build prompt: system + history + sub_query
+        # Note: sub_query (not the original full message) is placed as the current user turn.
+        # The model only needs to answer this specific sub-task, not the full compound query.
+        prompt = await _memory.build_prompt(chat_id=chat_id, current_query=sub_query)
+
+        temperature = _get_temperature(primary)
+
+        result = await _llm_client.async_complete(
+            model=primary,
+            messages=prompt,
+            fallback_models=fallbacks,
+            temperature=temperature,
+            max_tokens=2048,
+        )
+
+        logger.info(
+            "Dispatch [%s] → %s | %d tokens out",
+            category, result.model_used, result.completion_tokens
+        )
+        return result.content, result.model_used
+
+    async def _judge(self, sub_query: str, response: str) -> dict:
+        """
+        Ask the cheap utility LLM to rate the quality of a model response.
+
+        Severity scale:
+          0 = Perfect — fully addresses the sub-task
+          1 = Minor issue — correct but could be more complete
+          2 = Moderate gap — partially addresses the sub-task
+          3 = Severe failure — off-topic, empty, or factually broken
+
+        Only severity 3 triggers a retry. 0, 1, 2 are accepted immediately.
+
+        Args:
+            sub_query: The specific sub-task that was sent to the model.
+            response:  The model's response to that sub-task.
+        Returns:
+            dict with keys "severity" (int 0-3) and "reason" (str).
+            On parse failure, returns {"severity": 0, "reason": "parse failed — accepted"}.
+        """
+        judge_prompt = f"""\
+You are a response quality judge.
+
+Sub-task that was asked: {sub_query}
+Model response: {response}
+
+Score this response from 0 to 3:
+  0 = Perfect — fully and correctly addresses the sub-task
+  1 = Minor issue — correct but slightly incomplete
+  2 = Moderate gap — partially addresses the sub-task
+  3 = Severe failure — off-topic, completely empty, or factually broken
+
+Respond ONLY with a JSON object, no explanation:
+{{"severity": <0|1|2|3>, "reason": "<one sentence>"}}"""
+
+        messages = [{"role": "user", "content": judge_prompt}]
+
+        try:
+            result = await _llm_client.async_complete(
+                model=UTILITY_PRIMARY,
+                messages=messages,
+                fallback_models=UTILITY_FALLBACKS,  # full chain — all models as backup
+                temperature=0.0,   # deterministic judgment
+                max_tokens=128,    # judgment response is always short
+            )
+            raw = result.content.strip()
+
+            # Strip markdown fences if present
+            if raw.startswith("```"):
+                raw = raw[raw.find("\n") + 1:]
+            if raw.endswith("```"):
+                raw = raw[:-3]
+
+            parsed = json.loads(raw.strip())
+
+            severity = int(parsed.get("severity", 0))
+            # Clamp to valid range in case LLM returns something unexpected
+            severity = max(0, min(3, severity))
+            reason   = str(parsed.get("reason", ""))
+
+            logger.debug("Judgment: severity=%d | reason=%s", severity, reason)
+            return {"severity": severity, "reason": reason}
+
+        except Exception as e:
+            # If judgment itself fails, treat as severity 0 (accept) — don't retry on judge failure
+            logger.warning("Judgment failed (%s) — defaulting to severity 0 (accept)", e)
+            return {"severity": 0, "reason": "judgment parse failed — accepted as-is"}
+
+    async def _resplit_and_retry(
+        self,
+        original_query:  str,
+        failed_sub_query: str,
+        failure_reason:  str,
+        category:        str,
+        chat_id:         str,
+    ) -> Tuple[str, str]:
+        """
+        Two-step corrected retry for severity-3 failures:
+          1. Ask the utility LLM to write a better-scoped version of the failed sub-query.
+          2. Call the same expensive specialized model once more with the corrected sub-query.
+          The result of this retry is ALWAYS accepted — no second judgment.
+
+        Hard ceiling: this is the max 2nd call to the expensive model for this sub-task.
+
+        Args:
+            original_query:   The full original user message (context for resplit).
+            failed_sub_query: The sub-query that produced a severity-3 response.
+            failure_reason:   The judge's explanation of what was wrong.
+            category:         The route category — used to pick the right model again.
+            chat_id:          UUID4 — needed to fetch conversation history.
+        Returns:
+            Tuple[str, str]: (response_text, model_used_string) — always accepted.
+        """
+        # ── Step 1: Ask utility LLM to produce a better sub-query ───────────
+        resplit_prompt = f"""\
+A specialized AI model failed to answer a sub-task properly.
+
+Full original user query (context): {original_query}
+Failed sub-task that was sent to the model: {failed_sub_query}
+Why it failed (from judge): {failure_reason}
+
+Write an improved, more specific version of the sub-task that gives the model
+a better chance of answering correctly. Be concise and self-contained.
+Respond ONLY with the improved sub-task text. No explanation. No JSON."""
+
+        messages = [{"role": "user", "content": resplit_prompt}]
+
+        try:
+            resplit_result = await _llm_client.async_complete(
+                model=UTILITY_PRIMARY,
+                messages=messages,
+                fallback_models=UTILITY_FALLBACKS,  # full chain — all models as backup
+                temperature=0.3,   # slight creativity needed to produce a better sub-query
+                max_tokens=256,
+            )
+            corrected_sub_query = resplit_result.content.strip()
+            logger.info("Resplit produced corrected sub-query: %s", corrected_sub_query[:80])
+
+        except Exception as e:
+            # If resplit itself fails, fall back to the original sub-query
+            logger.warning("Resplit LLM call failed (%s) — retrying with original sub-query", e)
+            corrected_sub_query = failed_sub_query
+
+        # ── Step 2: Call the expensive model once more with corrected sub-query
+        # This is the FINAL call for this sub-task — result is accepted unconditionally.
+        response, model_used = await self._dispatch(
+            sub_query=corrected_sub_query,
+            category=category,
+            chat_id=chat_id,
+        )
+        logger.info("Retry complete for category '%s' — result accepted as final", category)
+        return response, model_used
+
+    async def _aggregate(
+        self,
+        original_query: str,
+        sub_responses:  List[dict],
+    ) -> str:
+        """
+        Ask the cheap utility LLM to synthesize multiple sub-responses into one
+        coherent, well-organized final reply.
+
+        Called ONLY for compound queries (2+ sub-tasks). Never called for single-intent.
+
+        Args:
+            original_query: The full original user message — used to frame the synthesis.
+            sub_responses:  List of dicts, each with "category", "sub_query", "response".
+        Returns:
+            str: A single coherent reply combining all sub-answers.
+        """
+        # Build a formatted block of all sub-responses for the aggregation prompt
+        sub_blocks = "\n\n".join(
+            f"--- [Category: {sr['category']}] ---\n"
+            f"Sub-task: {sr['sub_query']}\n"
+            f"Answer: {sr['response']}"
+            for sr in sub_responses
+        )
+
+        aggregation_prompt = f"""\
+You are an expert assistant synthesizing multiple AI responses into one final answer.
+
+Original user question: {original_query}
+
+The following sub-answers were generated by specialized models:
+{sub_blocks}
+
+Write a single, coherent, well-organized response that:
+1. Addresses all parts of the original question completely.
+2. Integrates all sub-answers naturally — do not just list them separately.
+3. If any sub-answers conflict with each other, explicitly note the conflict to the user.
+4. Uses clear headings or sections if the answer covers multiple distinct topics.
+
+Write the final combined answer now:"""
+
+        messages = [{"role": "user", "content": aggregation_prompt}]
+
+        try:
+            result = await _llm_client.async_complete(
+                model=UTILITY_PRIMARY,
+                messages=messages,
+                fallback_models=UTILITY_FALLBACKS,  # full chain — all models as backup
+                temperature=0.7,   # some creativity for smooth synthesis
+                max_tokens=2048,
+            )
+            logger.info("Aggregation complete | %d tokens out", result.completion_tokens)
+            return result.content
+
+        except Exception as e:
+            # If aggregation fails, fall back to concatenating the sub-responses directly
+            logger.error("Aggregation LLM call failed (%s) — falling back to concat", e)
+            return "\n\n---\n\n".join(
+                f"**{sr['category'].upper()}**\n{sr['response']}"
+                for sr in sub_responses
+            )
 
     @staticmethod
     def _make_title(message: str) -> str:
         """
         Generate a short sidebar title from the user's first message.
-        Takes the first 6 words, joined by spaces. Truncates with "…" if longer.
-
-        Args:
-            message: the raw user input text.
-        Returns:
-            str: a title string of at most 6 words.
+        Takes the first 6 words, appends '…' if the message is longer.
         """
         words = message.strip().split()
         if len(words) <= 6:
             return " ".join(words)
         return " ".join(words[:6]) + "…"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _get_temperature(model: str) -> float:
+    """
+    Return the correct temperature for a given model.
+
+    Gemini 3+ models (gemini-3.5-flash etc.) produce infinite loops and degraded
+    reasoning when temperature < 1.0 — LiteLLM itself warns about this.
+    All other models (Groq-hosted) work best with 0.7.
+
+    Args:
+        model: LiteLLM model string (e.g. "gemini/gemini-3.5-flash")
+    Returns:
+        float: 1.0 for Gemini, 0.7 for everything else.
+    """
+    return 1.0 if "gemini" in model else 0.7

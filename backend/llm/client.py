@@ -157,6 +157,7 @@ class LLMClient:
         fallback_models: Optional[list] = None,
         temperature: float = 0.7,
         max_tokens: int = 2048,
+        response_format: Optional[dict] = None,
     ) -> CompletionResult:
         """
         Call the LLM with automatic fallback on failure.
@@ -170,6 +171,7 @@ class LLMClient:
                              Defaults to empty list (no fallback).
             temperature:     Sampling temperature (0.0 = deterministic, 1.0 = creative).
             max_tokens:      Maximum tokens in the response.
+            response_format: Optional dict specifying format (e.g. {"type": "json_object"}).
         Returns:
             CompletionResult: typed object with content and token usage.
         Raises:
@@ -188,12 +190,16 @@ class LLMClient:
             try:
                 logger.info("Calling LLM: %s (%d messages)", attempt_model, len(messages))
 
-                response = await litellm.acompletion(
-                    model=attempt_model,
-                    messages=messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                )
+                kwargs = {
+                    "model": attempt_model,
+                    "messages": messages,
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                }
+                if response_format:
+                    kwargs["response_format"] = response_format
+
+                response = await litellm.acompletion(**kwargs)
 
                 # Extract the text content from the response
                 raw_content = response.choices[0].message.content or ""

@@ -1,0 +1,87 @@
+/* ═══════════════════════════════════════════════════════════════════════
+   PrismAI — Global Design System
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/* ── Google Fonts fallback already loaded via index.html ── */
+:root {
+  /* Core palette */
+  --bg-void:        #060608;
+  --bg-base:        #0a0a0f;
+  --bg-surface:     #0f0f18;
+  --bg-card:        #13131e;
+  --bg-card-hover:  #181826;
+  --bg-input:       #0d0d16;
+  --border-subtle:  rgba(255, 255, 255, 0.06);
+  --border-glow:    rgba(124, 58, 237, 0.35);
+
+  /* Brand gradient stops */
+  --purple:   #7c3aed;
+  --violet:   #8b5cf6;
+  --cyan:     #06b6d4;
+  --sky:      #38bdf8;
+  --amber:    #f59e0b;
+  --orange:   #fb923c;
+  --emerald:  #10b981;
+  --green:    #34d399;
+  --rose:     #f43f5e;
+  --pink:     #ec4899;
+
+  /* Text */
+  --text-primary:   rgba(255, 255, 255, 0.95);
+  --text-secondary: rgba(255, 255, 255, 0.55);
+  --text-muted:     rgba(255, 255, 255, 0.30);
+
+  /* Category badge colours */
+  --cat-dsa:      linear-gradient(135deg, #7c3aed, #4f46e5);
+  --cat-coding:   linear-gradient(135deg, #0891b2, #06b6d4);
+  --cat-math:     linear-gradient(135deg, #059669, #10b981);
+  --cat-science:  linear-gradient(135deg, #d97706, #f59e0b);
+  --cat-summarize:linear-gradient(135deg, #db2777, #ec4899);
+  --cat-general:  linear-gradient(135deg, #6b7280, #9ca3af);
+  --cat-fast:     linear-gradient(135deg, #9333ea, #c084fc);
+  --cat-manual:   linear-gradient(135deg, #374151, #6b7280);
+
+  /* Spacing */
+  --sidebar-w: 272px;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 24px;
+
+  /* Shadows */
+  --shadow-card: 0 4px 24px rgba(0,0,0,0.4), 0 1px 4px rgba(0,0,0,0.6);
+  --shadow-glow: 0 0 40px rgba(124, 58, 237, 0.12);
+}
+
+/* ── Reset ────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body, #root {
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg-void);
+  color: var(--text-primary);
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  font-size: 14px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── Scrollbar ───────────────────────────────────────── */
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.22); }
+
+/* ── Utility ─────────────────────────────────────────── */
+.gradient-text {
+  background: linear-gradient(135deg, var(--violet), var(--cyan));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.visually-hidden {
+  position: absolute; width: 1px; height: 1px;
+  overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap;
+}

@@ -12,6 +12,7 @@ GET /chats/{chat_id}/messages
     Used when the user clicks a chat in the sidebar to load it.
 """
 
+import json
 import logging
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
@@ -45,6 +46,15 @@ class MessageItem(BaseModel):
     route_category: Optional[str] = None
     token_count: int
     created_at: str
+    # Reconstructed badge data — derived from route_category & models_used_json at read time.
+    # categories_used: route_category CSV parsed into a list  e.g. ["dsa", "math"]
+    # models_used:     deserialized from models_used_json column (actual models per sub-task)
+    #                  Falls back to [model_used] for pre-migration rows.
+    categories_used: List[str] = []
+    models_used: List[str] = []
+    original_tokens: int = 0
+    rewritten_tokens: int = 0
+    reduction_pct: float = 0.0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -125,6 +135,22 @@ async def get_messages(chat_id: str) -> List[MessageItem]:
             route_category=msg.route_category,
             token_count=msg.token_count,
             created_at=msg.created_at,
+            # Parse route_category CSV → list  e.g. "dsa,math" → ["dsa", "math"]
+            # User messages have route_category=None → empty list
+            categories_used=(
+                [c.strip() for c in msg.route_category.split(",") if c.strip()]
+                if msg.route_category else []
+            ),
+            # Prefer the persisted JSON list (new rows), fall back to wrapping the
+            # single model_used string for pre-migration rows (models_used_json is NULL).
+            models_used=(
+                json.loads(msg.models_used_json)
+                if msg.models_used_json
+                else ([msg.model_used] if msg.model_used else [])
+            ),
+            original_tokens=msg.original_tokens,
+            rewritten_tokens=msg.rewritten_tokens,
+            reduction_pct=msg.reduction_pct,
         )
         for msg in messages
     ]

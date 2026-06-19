@@ -1,0 +1,233 @@
+/* ══════════════════════════════════════════════════════
+   MessageBubble.module.css
+   ══════════════════════════════════════════════════════ */
+
+/* ── Shared row layout ──────────────────────────────── */
+.userRow,
+.assistantRow {
+  display: flex;
+  gap: 12px;
+  padding: 6px 0;
+  animation: fadeSlideIn 0.25s ease both;
+}
+
+@keyframes fadeSlideIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0);   }
+}
+
+/* ── User bubble (right-aligned) ─────────────────── */
+.userRow {
+  flex-direction: row-reverse;
+}
+
+.userBubble {
+  max-width: 66%;
+  background: linear-gradient(135deg, #1a1a2e, #1e1e30);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 18px 18px 4px 18px;
+  padding: 12px 16px;
+  position: relative;
+}
+
+.userBubble .content {
+  color: var(--text-primary);
+  font-size: 14px;
+  line-height: 1.65;
+}
+
+/* ── Avatar ──────────────────────────────────────── */
+.avatar {
+  flex-shrink: 0;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--purple), var(--cyan));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 0 16px rgba(124, 58, 237, 0.35);
+  margin-top: 2px;
+}
+
+.avatarGlyph {
+  font-size: 14px;
+  color: white;
+}
+
+/* ── Assistant card ──────────────────────────────── */
+.assistantCard {
+  max-width: 80%;
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px 18px 18px 18px;
+  padding: 14px 18px 10px;
+  position: relative;
+  box-shadow: var(--shadow-card);
+  transition: border-color 0.2s;
+}
+
+.assistantCard:hover {
+  border-color: rgba(124, 58, 237, 0.2);
+}
+
+/* ── Prose (response text) ───────────────────────── */
+.prose {
+  color: var(--text-primary);
+  font-size: 14px;
+  line-height: 1.75;
+}
+
+.prose p { margin-bottom: 6px; }
+.prose p:last-child { margin-bottom: 0; }
+
+/* ── Meta row ────────────────────────────────────── */
+.metaRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255,255,255,0.05);
+}
+
+/* ── Category badges ─────────────────────────────── */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 9px;
+  border-radius: 20px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  color: white;
+  user-select: none;
+}
+
+.badgeIcon { font-size: 11px; }
+
+.badge-purple   { background: linear-gradient(135deg, #6d28d9, #4f46e5); }
+.badge-cyan     { background: linear-gradient(135deg, #0e7490, #06b6d4); }
+.badge-emerald  { background: linear-gradient(135deg, #047857, #10b981); }
+.badge-amber    { background: linear-gradient(135deg, #b45309, #f59e0b); }
+.badge-rose     { background: linear-gradient(135deg, #be185d, #ec4899); }
+.badge-violet   { background: linear-gradient(135deg, #7c3aed, #a78bfa); }
+.badge-slate    { background: rgba(255,255,255,0.1); }
+
+/* ── Model chip ──────────────────────────────────── */
+.modelChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 9px;
+  border-radius: 20px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--amber);
+  background: rgba(245, 158, 11, 0.1);
+  border: 1px solid rgba(245, 158, 11, 0.2);
+}
+
+.chipDot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--amber);
+  box-shadow: 0 0 6px var(--amber);
+  animation: pulse 2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.4; }
+}
+
+/* ── Aggregate chip ──────────────────────────────── */
+.aggregateChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 9px;
+  border-radius: 20px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--emerald);
+  background: rgba(16, 185, 129, 0.08);
+  border: 1px solid rgba(16, 185, 129, 0.22);
+}
+
+/* ── Savings chip ────────────────────────────────── */
+.savingsChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 9px;
+  border-radius: 20px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--emerald);
+  background: rgba(16, 185, 129, 0.1);
+  border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
+/* ── Manual chip ─────────────────────────────────── */
+.manualChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 9px;
+  border-radius: 20px;
+  font-size: 11px;
+  font-weight: 500;
+  color: rgba(255,255,255,0.6);
+  background: rgba(255,255,255,0.07);
+  border: 1px solid rgba(255,255,255,0.1);
+}
+
+/* ── Timestamp ───────────────────────────────────── */
+.time {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+/* ── Thinking bubble ─────────────────────────────── */
+.thinkingCard {
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px 18px 18px 18px;
+  padding: 12px 16px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.dots {
+  display: flex;
+  gap: 4px;
+}
+
+.dots span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--purple), var(--cyan));
+  animation: bounce 1.2s ease-in-out infinite;
+}
+
+.dots span:nth-child(2) { animation-delay: 0.18s; }
+.dots span:nth-child(3) { animation-delay: 0.36s; }
+
+@keyframes bounce {
+  0%, 80%, 100% { transform: scale(0.7); opacity: 0.5; }
+  40%            { transform: scale(1.15); opacity: 1;   }
+}
+
+.thinkingLabel {
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-style: italic;
+}

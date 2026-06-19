@@ -23,7 +23,7 @@ Response body (JSON):
 import logging
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, List
 
 from backend.pipeline.orchestrator import Orchestrator     # the pipeline coordinator
 from backend.utils.session import validate_session_id      # input validation
@@ -63,6 +63,11 @@ class ChatResponse(BaseModel):
     chat_id: str
     message_id: str
     route_category: str
+    categories_used: List[str]
+    models_used: List[str]
+    original_tokens: int
+    rewritten_tokens: int
+    reduction_pct: float
     eval_score: Optional[float] = None
 
 
@@ -112,6 +117,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
             chat_id=request.chat_id,
             message=request.message,
             model_preference=request.model_preference,
+            rewriter_enabled=request.rewriter_enabled,
         )
     except Exception as e:
         # Catch-all for LLMError and any unexpected failures
@@ -127,5 +133,10 @@ async def chat(request: ChatRequest) -> ChatResponse:
         chat_id=result.chat_id,
         message_id=result.message_id,
         route_category=result.route_category,
+        categories_used=result.categories_used,
+        models_used=result.models_used,
+        original_tokens=result.original_tokens,
+        rewritten_tokens=result.rewritten_tokens,
+        reduction_pct=result.reduction_pct,
         eval_score=result.eval_score,
     )
