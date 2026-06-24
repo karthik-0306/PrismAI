@@ -138,5 +138,4 @@ async def chat(request: ChatRequest) -> ChatResponse:
         original_tokens=result.original_tokens,
         rewritten_tokens=result.rewritten_tokens,
         reduction_pct=result.reduction_pct,
-        eval_score=result.eval_score,
     )

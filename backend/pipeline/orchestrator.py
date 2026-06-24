@@ -43,6 +43,8 @@ from backend.llm.client import LLMClient
 from backend.pipeline.memory import MemoryInjector
 from backend.pipeline.router import SmartRouter
 from backend.pipeline.rewriter import QueryRewriter, RewriteResult
+from backend.subagents.dsa_agent import DSASubagent
+from backend.subagents.evaluator_agent import EvaluatorSubagent
 from backend.utils.session import generate_id
 from backend.utils.token_counter import count_tokens
 
@@ -91,6 +93,8 @@ _llm_client = LLMClient()
 _memory     = MemoryInjector()
 _router     = SmartRouter()
 _rewriter   = QueryRewriter()
+_dsa_agent  = DSASubagent()
+_evaluator  = EvaluatorSubagent()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -112,7 +116,6 @@ class OrchestratorResult:
     original_tokens: int = 0           # Phase 2 metrics
     rewritten_tokens: int = 0          # Phase 2 metrics
     reduction_pct:   float = 0.0       # Phase 2 metrics
-    eval_score:      Optional[float] = None  # Phase 6 placeholder — always None here
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -427,6 +430,18 @@ class Orchestrator:
         Returns:
             Tuple[str, str]: (response_text, model_used_string)
         """
+        # ── Phase 5 Subagent Hook ──
+        if category == "dsa":
+            logger.info("Dispatching to DSASubagent for category 'dsa'...")
+            response = await _dsa_agent.solve(sub_query)
+            return response, "subagent/dsa"
+
+        # ── Phase 6 Evaluator Hook ──
+        if category == "evaluate":
+            logger.info("Dispatching to EvaluatorSubagent for category 'evaluate'...")
+            response = await _evaluator.evaluate_pair(sub_query)
+            return response, "subagent/evaluate"
+
         # Pick the model chain for this category
         models = ROUTE_MAP.get(category, ROUTE_MAP["general"])
         primary   = models["primary"]

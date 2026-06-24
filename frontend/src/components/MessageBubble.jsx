@@ -2,9 +2,14 @@
  * src/components/MessageBubble.jsx
  *
  * Renders a single chat message. User messages are right-aligned.
- * Assistant messages are left-aligned with rich metadata badges showing
- * which categories were used and which models actually answered.
+ * Assistant messages are left-aligned with full Markdown rendering
+ * (headings, bold, italic, tables, code blocks with syntax highlighting)
+ * and rich metadata badges.
  */
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
+import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import styles from './MessageBubble.module.css';
 
 /* ── Category configuration ─────────────────────────────────────────── */
@@ -14,6 +19,7 @@ const CATEGORY_CONFIG = {
   math:     { label: 'Math',      icon: '📐', color: 'emerald'},
   science:  { label: 'Science',   icon: '🔬', color: 'amber'  },
   summarize:{ label: 'Summarize', icon: '📋', color: 'rose'   },
+  evaluate: { label: 'Evaluate',  icon: '📊', color: 'amber'  },
   general:  { label: 'General',   icon: '💬', color: 'slate'  },
   fast:     { label: 'Fast',      icon: '⚡', color: 'violet' },
   manual:   { label: 'Manual',    icon: '🎯', color: 'slate'  },
@@ -22,9 +28,6 @@ const CATEGORY_CONFIG = {
 /* ── Model display name shortener ───────────────────────────────────── */
 function shortModelName(full) {
   if (!full || full === 'aggregated') return 'Aggregated';
-  // "groq/openai/gpt-oss-120b" → "gpt-oss-120b"
-  // "gemini/gemini-3.5-flash"  → "Gemini 3.5 Flash"
-  // "groq/llama-3.1-8b-instant"→ "Llama 3.1 8B"
   const part = full.split('/').pop();
   return part
     .replace(/-instant$/, '')
@@ -37,6 +40,86 @@ function shortModelName(full) {
 function now() {
   return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
+
+/* ── Markdown code block renderer ────────────────────── */
+// In react-markdown v9, 'inline' prop is gone.
+// We detect inline vs block by: no className AND no newline in children = inline.
+function CodeBlock({ children, className, node, ...props }) {
+  const match = /language-(\w+)/.exec(className || '');
+  const childStr = String(children);
+  const isInline = !match && !childStr.includes('\n');
+
+  if (isInline) {
+    return (
+      <code className={styles.inlineCode} {...props}>
+        {children}
+      </code>
+    );
+  }
+
+  const language = match ? match[1] : 'text';
+  const code = childStr.replace(/\n$/, '');
+
+  return (
+    <div className={styles.codeWrapper}>
+      <div className={styles.codeHeader}>
+        <span className={styles.codeLang}>{language}</span>
+        <button
+          className={styles.copyBtn}
+          onClick={() => navigator.clipboard.writeText(code)}
+          title="Copy code"
+        >
+          Copy
+        </button>
+      </div>
+      <SyntaxHighlighter
+        style={oneDark}
+        language={language}
+        PreTag="div"
+        customStyle={{
+          margin: 0,
+          borderRadius: '0 0 8px 8px',
+          fontSize: '13px',
+          lineHeight: '1.6',
+          background: '#0d0d1a',
+        }}
+        codeTagProps={{ style: { fontFamily: "'Fira Code', 'Cascadia Code', monospace" } }}
+        {...props}
+      >
+        {code}
+      </SyntaxHighlighter>
+    </div>
+  );
+}
+
+/* ── Markdown components map ────────────────────────────────────────── */
+const markdownComponents = {
+  code: CodeBlock,
+  h1: ({ children }) => <h1 className={styles.mdH1}>{children}</h1>,
+  h2: ({ children }) => <h2 className={styles.mdH2}>{children}</h2>,
+  h3: ({ children }) => <h3 className={styles.mdH3}>{children}</h3>,
+  h4: ({ children }) => <h4 className={styles.mdH4}>{children}</h4>,
+  p:  ({ children }) => <p  className={styles.mdP}>{children}</p>,
+  ul: ({ children }) => <ul className={styles.mdUl}>{children}</ul>,
+  ol: ({ children }) => <ol className={styles.mdOl}>{children}</ol>,
+  li: ({ children }) => <li className={styles.mdLi}>{children}</li>,
+  strong: ({ children }) => <strong className={styles.mdStrong}>{children}</strong>,
+  em: ({ children }) => <em className={styles.mdEm}>{children}</em>,
+  blockquote: ({ children }) => <blockquote className={styles.mdBlockquote}>{children}</blockquote>,
+  hr: () => <hr className={styles.mdHr} />,
+  table: ({ children }) => (
+    <div className={styles.tableWrapper}>
+      <table className={styles.mdTable}>{children}</table>
+    </div>
+  ),
+  th: ({ children }) => <th className={styles.mdTh}>{children}</th>,
+  td: ({ children }) => <td className={styles.mdTd}>{children}</td>,
+  a: ({ href, children }) => (
+    <a className={styles.mdLink} href={href} target="_blank" rel="noreferrer">
+      {children}
+    </a>
+  ),
+};
 
 /* ── User Bubble ─────────────────────────────────────────────────────── */
 function UserBubble({ content }) {
@@ -62,11 +145,14 @@ function AssistantBubble({ content, categories_used, models_used, model_used, re
       </div>
 
       <div className={styles.assistantCard}>
-        {/* Response text */}
+        {/* Markdown-rendered response */}
         <div className={styles.prose}>
-          {content.split('\n').map((line, i) => (
-            line.trim() === '' ? <br key={i} /> : <p key={i}>{line}</p>
-          ))}
+          <ReactMarkdown
+            remarkPlugins={[remarkGfm]}
+            components={markdownComponents}
+          >
+            {content}
+          </ReactMarkdown>
         </div>
 
         {/* Metadata badges row */}
