@@ -78,6 +78,22 @@
   line-height: 1.75;
 }
 
+/* Streaming cursor */
+.streamCursor {
+  display: inline-block;
+  color: var(--purple);
+  font-size: 16px;
+  line-height: 1;
+  margin-left: 1px;
+  vertical-align: middle;
+  animation: blink 0.75s step-start infinite;
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0; }
+}
+
 /* Headings */
 .mdH1, .mdH2, .mdH3, .mdH4 {
   font-weight: 700;
@@ -241,6 +257,7 @@
 .badge-rose     { background: linear-gradient(135deg, #be185d, #ec4899); }
 .badge-violet   { background: linear-gradient(135deg, #7c3aed, #a78bfa); }
 .badge-slate    { background: rgba(255,255,255,0.1); }
+.badge-sky      { background: linear-gradient(135deg, #0369a1, #38bdf8); }
 
 /* ── Model chip ──────────────────────────────────── */
 .modelChip {

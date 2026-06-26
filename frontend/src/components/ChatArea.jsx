@@ -46,7 +46,7 @@ function EmptyState() {
   );
 }
 
-export default function ChatArea({ messages, isThinking, onSend, activeChatTitle }) {
+export default function ChatArea({ messages, isThinking, isStreaming, onSend, activeChatTitle }) {
   const listRef = useRef(null);
   const inputRef = useRef(null);
 
@@ -77,6 +77,26 @@ export default function ChatArea({ messages, isThinking, onSend, activeChatTitle
     onSend(text);
   }
 
+  function handleExport() {
+    if (messages.length === 0) return;
+    
+    let md = `# ${activeChatTitle || 'Chat Export'}\n\n`;
+    messages.forEach(m => {
+      md += `### ${m.role === 'user' ? 'You' : 'PrismAI'}\n`;
+      md += `${m.content}\n\n---\n\n`;
+    });
+
+    const blob = new Blob([md], { type: 'text/markdown' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${(activeChatTitle || 'chat').replace(/[^a-z0-9]/gi, '_').toLowerCase()}.md`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
   return (
     <main className={styles.chatArea} aria-label="Chat area">
       {/* Header */}
@@ -86,6 +106,11 @@ export default function ChatArea({ messages, isThinking, onSend, activeChatTitle
           <h2 className={styles.headerTitle}>{activeChatTitle || 'New Chat'}</h2>
         </div>
         <div className={styles.headerRight}>
+          {messages.length > 0 && (
+            <button className={styles.exportBtn} onClick={handleExport} aria-label="Export chat to Markdown">
+              📥 Export
+            </button>
+          )}
           {savingsPct > 0 && (
             <span className={styles.headerSavings} title={`${savedTokens} tokens saved across session`}>
               ⚡ {savingsPct}% compression
@@ -100,9 +125,16 @@ export default function ChatArea({ messages, isThinking, onSend, activeChatTitle
         {messages.length === 0 ? (
           <EmptyState />
         ) : (
-          messages.map((msg) => (
-            <MessageBubble key={msg.message_id || msg._id} message={msg} />
-          ))
+          messages.map((msg, idx) => {
+            const isLastAsst = msg.role === 'assistant' && idx === messages.length - 1;
+            return (
+              <MessageBubble
+                key={msg.message_id || msg._id}
+                message={msg}
+                isStreaming={isStreaming && isLastAsst}
+              />
+            );
+          })
         )}
         {isThinking && <ThinkingBubble />}
       </div>
@@ -122,13 +154,13 @@ export default function ChatArea({ messages, isThinking, onSend, activeChatTitle
               e.target.style.height = Math.min(e.target.scrollHeight, 140) + 'px';
             }}
             aria-label="Message input"
-            disabled={isThinking}
+            disabled={isThinking || isStreaming}
           />
           <button
             id="btn-send"
             className={styles.sendBtn}
             onClick={submit}
-            disabled={isThinking}
+            disabled={isThinking || isStreaming}
             aria-label="Send message"
           >
             {isThinking ? (

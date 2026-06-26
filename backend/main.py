@@ -19,6 +19,7 @@ from backend.database.connection import initialize_database
 from backend.routers.chat import router as chat_router
 from backend.routers.history import router as history_router
 from backend.routers.metrics import router as metrics_router
+from backend.routers.streaming import router as streaming_router
 
 # ── Configure Logging ─────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -76,6 +77,7 @@ app.add_middleware(
 app.include_router(chat_router, prefix="/api", tags=["Chat"])
 app.include_router(history_router, prefix="/api", tags=["History"])
 app.include_router(metrics_router, prefix="/api", tags=["Metrics"])
+app.include_router(streaming_router, prefix="/api", tags=["Streaming"])
 
 # Root debug health check endpoint
 @app.get("/health", tags=["Health"])

@@ -45,6 +45,7 @@ from backend.pipeline.router import SmartRouter
 from backend.pipeline.rewriter import QueryRewriter, RewriteResult
 from backend.subagents.dsa_agent import DSASubagent
 from backend.subagents.evaluator_agent import EvaluatorSubagent
+from backend.subagents.web_search_agent import WebSearchSubagent
 from backend.utils.session import generate_id
 from backend.utils.token_counter import count_tokens
 
@@ -63,6 +64,7 @@ ROUTE_MAP = {
     "summarize": {"primary": "gemini/gemini-3.5-flash",        "fallback_1": "groq/llama-3.1-8b-instant",    "fallback_2": "groq/llama-3.3-70b-versatile"},
     "fast":      {"primary": "groq/llama-3.1-8b-instant",      "fallback_1": "gemini/gemini-3.5-flash",      "fallback_2": "groq/llama-3.3-70b-versatile"},
     "general":   {"primary": "gemini/gemini-3.5-flash",        "fallback_1": "groq/llama-3.3-70b-versatile", "fallback_2": "groq/llama-3.1-8b-instant"},
+    # web_search is handled entirely by WebSearchSubagent (no direct LLM route needed here)
 }
 
 # Priority order: cheapest/fastest first, most capable last.
@@ -93,8 +95,9 @@ _llm_client = LLMClient()
 _memory     = MemoryInjector()
 _router     = SmartRouter()
 _rewriter   = QueryRewriter()
-_dsa_agent  = DSASubagent()
-_evaluator  = EvaluatorSubagent()
+_dsa_agent    = DSASubagent()
+_evaluator    = EvaluatorSubagent()
+_web_searcher = WebSearchSubagent()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -201,6 +204,208 @@ class Orchestrator:
             rewrite_result=rewrite_result,
         )
 
+    async def stream(
+        self,
+        session_id:        str,
+        chat_id:           Optional[str],
+        message:           str,
+        model_preference:  str = "auto",
+        rewriter_enabled:  bool = True,
+    ):
+        """
+        Streaming version of run(). Yields SSE-compatible event dicts.
+
+        Event types:
+          {"type": "token",    "content": "<text chunk>"}
+          {"type": "metadata", "chat_id": ..., "categories_used": [...], ...}
+          {"type": "fallback"} — signals frontend to use non-streaming path (compound query)
+          {"type": "error",    "detail": "<message>"}
+
+        The final metadata event is emitted after all tokens so the frontend
+        can attach badges (model used, category, savings) at the right moment.
+        """
+        # ── Step 1: Resolve or create chat + save user message ─────────────────
+        if chat_id is None:
+            chat_id = generate_id()
+            title   = self._make_title(message)
+            await queries.save_chat(chat_id, session_id, title)
+            logger.info("Stream: Created new chat %s for session %s", chat_id, session_id)
+
+        user_message_id  = generate_id()
+        user_token_count = count_tokens(message)
+        await queries.save_message(
+            message_id=user_message_id,
+            chat_id=chat_id,
+            role="user",
+            content=message,
+            token_count=user_token_count,
+        )
+
+        # ── Rewriter ─────────────────────────────────────────────────────────────
+        if rewriter_enabled:
+            rewrite_result = await _rewriter.rewrite(message)
+            query_to_use = rewrite_result.rewritten_query
+        else:
+            rewrite_result = None
+            query_to_use = message
+
+        # ── Manual mode: stream the chosen model directly ─────────────────────
+        if model_preference != "auto":
+            fallbacks = [m for m in ALL_MODELS_BY_QUALITY if m != model_preference]
+            prompt = await _memory.build_prompt(chat_id=chat_id, current_query=query_to_use)
+            full_response = ""
+            model_used = model_preference
+
+            async for chunk, used_model in _llm_client.async_stream(
+                model=model_preference,
+                messages=prompt,
+                fallback_models=fallbacks,
+                max_tokens=2048,
+            ):
+                if chunk:
+                    full_response += chunk
+                    model_used = used_model
+                    yield {"type": "token", "content": chunk}
+                else:
+                    model_used = used_model  # sentinel — capture final model
+
+            yield await self._finalize_stream(
+                chat_id=chat_id,
+                full_response=full_response,
+                model_used=model_used,
+                route_category="manual",
+                categories_used=["manual"],
+                models_used=[model_used],
+                rewrite_result=rewrite_result,
+                original_message=message,
+            )
+            return
+
+        # ── Auto mode: classify ────────────────────────────────────────────────
+        sub_queries = await _router.classify_and_split(query_to_use)
+        logger.info("Stream Router: %d sub-task(s): %s", len(sub_queries), [s["category"] for s in sub_queries])
+
+        # ── Compound query: signal fallback ───────────────────────────────────
+        if len(sub_queries) > 1:
+            logger.info("Stream: compound query — signalling fallback to non-streaming")
+            yield {"type": "fallback", "chat_id": chat_id}
+            return
+
+        # ── Single intent: stream ─────────────────────────────────────────────
+        sq = sub_queries[0]
+        category  = sq["category"]
+        sub_query = sq["sub_query"]
+        full_response = ""
+        model_used = "unknown"
+
+        if category == "dsa":
+            async for chunk, used_model in _dsa_agent.stream_solve(sub_query):
+                if chunk:
+                    full_response += chunk
+                    model_used = used_model
+                    yield {"type": "token", "content": chunk}
+                else:
+                    model_used = used_model
+            model_used = f"subagent/dsa ({model_used})"
+
+        elif category == "web_search":
+            async for chunk, used_model in _web_searcher.stream_solve(sub_query):
+                if chunk:
+                    full_response += chunk
+                    model_used = used_model
+                    yield {"type": "token", "content": chunk}
+                else:
+                    model_used = used_model
+            model_used = f"subagent/web_search ({model_used})"
+
+        elif category == "evaluate":
+            # Evaluator makes parallel judge calls first, then we stream the report
+            report = await _evaluator.evaluate_pair(sub_query)
+            # Stream the report text in chunks for a nice visual effect
+            chunk_size = 8
+            for i in range(0, len(report), chunk_size):
+                piece = report[i:i + chunk_size]
+                full_response += piece
+                yield {"type": "token", "content": piece}
+            model_used = "subagent/evaluate"
+
+        else:
+            # Direct LLM route
+            models = ROUTE_MAP.get(category, ROUTE_MAP["general"])
+            primary   = models["primary"]
+            fallbacks = [models["fallback_1"], models["fallback_2"]]
+            prompt = await _memory.build_prompt(chat_id=chat_id, current_query=sub_query)
+
+            async for chunk, used_model in _llm_client.async_stream(
+                model=primary,
+                messages=prompt,
+                fallback_models=fallbacks,
+                max_tokens=2048,
+            ):
+                if chunk:
+                    full_response += chunk
+                    model_used = used_model
+                    yield {"type": "token", "content": chunk}
+                else:
+                    model_used = used_model
+
+        # ── Emit metadata + save to DB ────────────────────────────────────────
+        yield await self._finalize_stream(
+            chat_id=chat_id,
+            full_response=full_response,
+            model_used=model_used,
+            route_category=category,
+            categories_used=[category],
+            models_used=[model_used],
+            rewrite_result=rewrite_result,
+            original_message=message,
+        )
+
+    async def _finalize_stream(
+        self,
+        chat_id: str,
+        full_response: str,
+        model_used: str,
+        route_category: str,
+        categories_used: List[str],
+        models_used: List[str],
+        rewrite_result,
+        original_message: str,
+    ) -> dict:
+        """
+        Save the completed streamed response to DB and return the metadata event dict.
+        """
+        assistant_message_id = generate_id()
+        await queries.save_message(
+            message_id=assistant_message_id,
+            chat_id=chat_id,
+            role="assistant",
+            content=full_response,
+            token_count=count_tokens(full_response),
+            model_used=model_used,
+            route_category=route_category,
+            models_used=models_used,
+            original_tokens=rewrite_result.original_tokens if rewrite_result else count_tokens(original_message),
+            rewritten_tokens=rewrite_result.rewritten_tokens if rewrite_result else count_tokens(original_message),
+            reduction_pct=rewrite_result.reduction_pct if rewrite_result else 0.0,
+        )
+        logger.info("Stream: saved response %s | category=%s | model=%s", assistant_message_id, route_category, model_used)
+
+        return {
+            "type":             "metadata",
+            "chat_id":          chat_id,
+            "message_id":       assistant_message_id,
+            "model_used":       model_used,
+            "route_category":   route_category,
+            "categories_used":  categories_used,
+            "models_used":      models_used,
+            "original_tokens":  rewrite_result.original_tokens if rewrite_result else count_tokens(original_message),
+            "rewritten_tokens": rewrite_result.rewritten_tokens if rewrite_result else count_tokens(original_message),
+            "reduction_pct":    rewrite_result.reduction_pct if rewrite_result else 0.0,
+        }
+
+
+
     # ─────────────────────────────────────────────────────────────────────────
     # MANUAL MODE
     # ─────────────────────────────────────────────────────────────────────────
@@ -260,7 +465,10 @@ class Orchestrator:
             token_count=count_tokens(result.content, model=result.model_used),
             model_used=result.model_used,
             route_category="manual",
-            models_used=[result.model_used],  # always one model in manual mode
+            models_used=[result.model_used],
+            original_tokens=rewrite_result.original_tokens if rewrite_result else count_tokens(message),
+            rewritten_tokens=rewrite_result.rewritten_tokens if rewrite_result else count_tokens(message),
+            reduction_pct=rewrite_result.reduction_pct if rewrite_result else 0.0,
         )
 
         return OrchestratorResult(
@@ -386,7 +594,10 @@ class Orchestrator:
             token_count=count_tokens(final_response),
             model_used=final_model,
             route_category=route_category,
-            models_used=models_used,  # persist the full list so history can rebuild badges
+            models_used=models_used,
+            original_tokens=rewrite_result.original_tokens if rewrite_result else count_tokens(message),
+            rewritten_tokens=rewrite_result.rewritten_tokens if rewrite_result else count_tokens(message),
+            reduction_pct=rewrite_result.reduction_pct if rewrite_result else 0.0,
         )
 
         logger.info(
@@ -435,6 +646,12 @@ class Orchestrator:
             logger.info("Dispatching to DSASubagent for category 'dsa'...")
             response = await _dsa_agent.solve(sub_query)
             return response, "subagent/dsa"
+
+        # ── Web Search Subagent Hook ──
+        if category == "web_search":
+            logger.info("Dispatching to WebSearchSubagent for category 'web_search'...")
+            response = await _web_searcher.solve(sub_query)
+            return response, "subagent/web_search"
 
         # ── Phase 6 Evaluator Hook ──
         if category == "evaluate":

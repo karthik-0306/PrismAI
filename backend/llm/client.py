@@ -243,6 +243,109 @@ class LLMClient:
             original=last_error,
         )
 
+    async def async_stream(
+        self,
+        model: str,
+        messages: list,
+        fallback_models: Optional[list] = None,
+        temperature: float = 0.7,
+        max_tokens: int = 2048,
+    ):
+        """
+        Stream tokens from the LLM, yielding (chunk: str, model_used: str) tuples.
+
+        Each yield is a partial text chunk as the model generates it.
+        A final sentinel tuple ("", model_used) is yielded at the end to signal
+        which model actually responded.
+
+        On streaming failure for the primary model, falls back to async_complete()
+        on the next model in the chain and yields the full content as a single chunk.
+
+        Args:
+            model:           Primary LiteLLM model string.
+            messages:        List of {role, content} dicts.
+            fallback_models: Ordered fallback list.
+            temperature:     Sampling temperature.
+            max_tokens:      Max tokens to generate.
+        Yields:
+            tuple[str, str]: (text_chunk, model_used)
+            Final tuple has empty string as chunk — signals completion.
+        """
+        if fallback_models is None:
+            fallback_models = []
+
+        all_models = [model] + fallback_models
+
+        for attempt_model in all_models:
+            try:
+                logger.info("Streaming from LLM: %s (%d messages)", attempt_model, len(messages))
+                temperature_used = 1.0 if "gemini" in attempt_model else temperature
+
+                response = await litellm.acompletion(
+                    model=attempt_model,
+                    messages=messages,
+                    temperature=temperature_used,
+                    max_tokens=max_tokens,
+                    stream=True,
+                )
+
+                # Track accumulated content for think-tag stripping
+                buffer = ""
+                in_think = False
+
+                async for chunk in response:
+                    delta = chunk.choices[0].delta
+                    piece = delta.content or ""
+                    if not piece:
+                        continue
+
+                    # Handle <think>...</think> stripping incrementally
+                    buffer += piece
+                    if "<think>" in buffer:
+                        in_think = True
+                    if in_think:
+                        if "</think>" in buffer:
+                            # Strip everything up to and including </think>
+                            buffer = buffer[buffer.find("</think>") + len("</think>"):]
+                            in_think = False
+                        else:
+                            # Still inside think block, don't yield yet
+                            continue
+
+                    if buffer:
+                        yield buffer, attempt_model
+                        buffer = ""
+
+                # Yield any remaining buffer content
+                if buffer and not in_think:
+                    yield buffer, attempt_model
+
+                # Sentinel: empty chunk signals which model finished
+                yield "", attempt_model
+                return  # Success — stop trying fallbacks
+
+            except Exception as e:
+                logger.warning(
+                    "Streaming failed for %s: %s — trying fallback",
+                    attempt_model, str(e)[:120]
+                )
+                # Try next model in the chain
+
+        # All streaming attempts failed — fall back to non-streaming
+        logger.warning("All streaming attempts failed — falling back to async_complete()")
+        try:
+            result = await self.async_complete(
+                model=model,
+                messages=messages,
+                fallback_models=fallback_models,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            yield result.content, result.model_used
+            yield "", result.model_used  # sentinel
+        except LLMError as e:
+            raise  # Re-raise if even non-streaming fails
+
     @staticmethod
     def _strip_think_tags(text: str) -> str:
         """

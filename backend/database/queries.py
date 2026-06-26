@@ -75,6 +75,47 @@ async def get_all_chats_for_session(session_id: str) -> List[Chat]:
     ]
 
 
+async def search_chats(session_id: str, query: str) -> List[Chat]:
+    """
+    Search past conversations by keyword in the title or message content.
+    Returns matched chats for the session, newest first.
+    """
+    async with get_db() as db:
+        cursor = await db.execute(
+            """
+            SELECT DISTINCT c.chat_id, c.session_id, c.title, c.created_at
+            FROM chats c
+            LEFT JOIN messages m ON c.chat_id = m.chat_id
+            WHERE c.session_id = ? 
+              AND (c.title LIKE ? OR m.content LIKE ?)
+            ORDER BY c.created_at DESC
+            """,
+            (session_id, f"%{query}%", f"%{query}%")
+        )
+        rows = await cursor.fetchall()
+
+    return [
+        Chat(
+            chat_id=row["chat_id"],
+            session_id=row["session_id"],
+            title=row["title"],
+            created_at=row["created_at"],
+        )
+        for row in rows
+    ]
+
+
+async def delete_chat(chat_id: str) -> None:
+    """
+    Delete a chat and all its associated messages from the database.
+    """
+    async with get_db() as db:
+        await db.execute("DELETE FROM messages WHERE chat_id = ?", (chat_id,))
+        await db.execute("DELETE FROM chats WHERE chat_id = ?", (chat_id,))
+        await db.commit()
+    logger.info("Deleted chat %s and all its messages", chat_id)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # MESSAGE QUERIES
 # ─────────────────────────────────────────────────────────────────────────────
@@ -318,17 +359,7 @@ async def get_latest_summary(chat_id: str) -> Optional[Summary]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def get_token_stats_for_session(session_id: str) -> dict:
-    """
-    Aggregate token count statistics across all chats in a session.
-    Used by the metrics router (Phase 2+) to report savings to the frontend.
-    In Phase 1 this returns placeholder zeroes — real data populates in Phase 2
-    once the rewriter stores original vs rewritten token counts.
-
-    Args:
-        session_id: UUID4 string identifying the browser session.
-    Returns:
-        dict with keys: total_messages, total_tokens, avg_tokens_per_message
-    """
+    """Legacy stats query — kept for backwards compatibility."""
     async with get_db() as db:
         cursor = await db.execute(
             """
@@ -349,4 +380,110 @@ async def get_token_stats_for_session(session_id: str) -> dict:
         "total_messages": total_messages,
         "total_tokens": total_tokens,
         "avg_tokens_per_message": avg,
+    }
+
+
+async def get_full_metrics_for_session(session_id: str) -> dict:
+    """
+    Rich analytics query for the dashboard. Returns:
+      - total_queries, total_chats, total_tokens
+      - tokens_saved, avg_reduction_pct (from rewriter)
+      - category_breakdown: {category: count}
+      - model_usage: {short_model_name: count}
+      - savings_timeline: [{date: "YYYY-MM-DD", saved: N}] per day
+    """
+    async with get_db() as db:
+        # ── Total chat count ──────────────────────────────────────────────────
+        cur = await db.execute(
+            "SELECT COUNT(*) as n FROM chats WHERE session_id = ?", (session_id,)
+        )
+        total_chats = (await cur.fetchone())["n"]
+
+        # ── Assistant messages aggregate ──────────────────────────────────────
+        cur = await db.execute(
+            """
+            SELECT
+                COUNT(*) as total_queries,
+                COALESCE(SUM(m.token_count), 0) as total_tokens,
+                COALESCE(SUM(m.original_tokens - m.rewritten_tokens), 0) as tokens_saved,
+                COALESCE(AVG(CASE WHEN m.reduction_pct > 0 THEN m.reduction_pct ELSE NULL END), 0) as avg_reduction_pct
+            FROM messages m
+            JOIN chats c ON m.chat_id = c.chat_id
+            WHERE c.session_id = ? AND m.role = 'assistant'
+            """,
+            (session_id,)
+        )
+        agg = await cur.fetchone()
+
+        # ── Category breakdown ────────────────────────────────────────────────
+        cur = await db.execute(
+            """
+            SELECT route_category, COUNT(*) as cnt
+            FROM messages m
+            JOIN chats c ON m.chat_id = c.chat_id
+            WHERE c.session_id = ? AND m.role = 'assistant' AND m.route_category IS NOT NULL
+            GROUP BY route_category
+            ORDER BY cnt DESC
+            """,
+            (session_id,)
+        )
+        cat_rows = await cur.fetchall()
+        category_breakdown = {}
+        for row in cat_rows:
+            # compound categories stored as CSV e.g. "dsa,math" — split and count each
+            for cat in (row["route_category"] or "").split(","):
+                cat = cat.strip()
+                if cat:
+                    category_breakdown[cat] = category_breakdown.get(cat, 0) + row["cnt"]
+
+        # ── Model usage ───────────────────────────────────────────────────────
+        cur = await db.execute(
+            """
+            SELECT model_used, COUNT(*) as cnt
+            FROM messages m
+            JOIN chats c ON m.chat_id = c.chat_id
+            WHERE c.session_id = ? AND m.role = 'assistant' AND m.model_used IS NOT NULL
+            GROUP BY model_used
+            ORDER BY cnt DESC
+            LIMIT 10
+            """,
+            (session_id,)
+        )
+        model_rows = await cur.fetchall()
+        model_usage = {}
+        for row in model_rows:
+            # Shorten the model name for display: "groq/qwen/qwen3-32b" → "qwen3-32b"
+            name = (row["model_used"] or "unknown").split("/")[-1]
+            model_usage[name] = model_usage.get(name, 0) + row["cnt"]
+
+        # ── Daily savings timeline ────────────────────────────────────────────
+        cur = await db.execute(
+            """
+            SELECT
+                DATE(m.created_at) as day,
+                COALESCE(SUM(m.original_tokens - m.rewritten_tokens), 0) as saved
+            FROM messages m
+            JOIN chats c ON m.chat_id = c.chat_id
+            WHERE c.session_id = ? AND m.role = 'assistant'
+            GROUP BY DATE(m.created_at)
+            ORDER BY day ASC
+            LIMIT 30
+            """,
+            (session_id,)
+        )
+        timeline_rows = await cur.fetchall()
+        savings_timeline = [
+            {"date": row["day"], "saved": max(0, row["saved"])}
+            for row in timeline_rows
+        ]
+
+    return {
+        "total_queries":      agg["total_queries"] if agg else 0,
+        "total_chats":        total_chats,
+        "total_tokens":       agg["total_tokens"] if agg else 0,
+        "tokens_saved":       max(0, agg["tokens_saved"]) if agg else 0,
+        "avg_reduction_pct":  round(agg["avg_reduction_pct"] or 0.0, 1),
+        "category_breakdown": category_breakdown,
+        "model_usage":        model_usage,
+        "savings_timeline":   savings_timeline,
     }

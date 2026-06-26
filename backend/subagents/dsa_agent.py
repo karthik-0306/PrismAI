@@ -96,3 +96,32 @@ class DSASubagent:
         except Exception as e:
             logger.error("DSA Agent: LLM failure: %s", e)
             raise e
+
+    async def stream_solve(self, query: str):
+        """
+        Stream the DSA response token by token.
+        Yields (chunk: str, model_used: str) tuples — same contract as LLMClient.async_stream().
+        The final tuple has an empty chunk string (sentinel for completion).
+        """
+        logger.info("DSA Agent: Streaming query: %s...", query[:50])
+
+        search_context = await self._ground_with_search(query)
+
+        prompt_content = f"<USER_QUERY>\n{query}\n</USER_QUERY>"
+        if search_context:
+            prompt_content += f"\n\n<SEARCH_CONTEXT>\n{search_context}\n</SEARCH_CONTEXT>"
+
+        messages = [
+            {"role": "system", "content": DSA_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt_content}
+        ]
+
+        async for chunk, model_used in self._llm.async_stream(
+            model=DSA_PRIMARY_MODEL,
+            messages=messages,
+            fallback_models=DSA_FALLBACK_MODELS,
+            temperature=0.1,
+            max_tokens=4000,
+        ):
+            yield chunk, model_used
+

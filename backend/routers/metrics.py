@@ -1,81 +1,94 @@
 """
 backend/routers/metrics.py
 
-GET /metrics?session_id=... — Returns token usage statistics for a session.
-
-Phase 1: returns basic aggregate counts from the DB.
-Phase 2: will add token savings from the query rewriter (original vs rewritten).
-The frontend polls this endpoint every 5 messages to update the MetricsBar.
+GET /api/metrics?session_id=... — Returns rich analytics data for the dashboard.
+GET /api/model-status          — Returns live health status of each LLM provider.
 """
 
 import logging
+import asyncio
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
+from typing import Dict, List, Optional
 
-from backend.database import queries                   # DB aggregation query
-from backend.utils.session import validate_session_id  # input validation
+from backend.database import queries
+from backend.utils.session import validate_session_id
 
 logger = logging.getLogger(__name__)
-
 router = APIRouter()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# RESPONSE MODEL
+# RESPONSE MODELS
 # ─────────────────────────────────────────────────────────────────────────────
 
 class MetricsResponse(BaseModel):
-    """
-    Token usage statistics for a session.
-    Phase 1 fields (real data):
-        total_messages, total_tokens, avg_tokens_per_message
-    Phase 2 additions (placeholders until rewriter is built):
-        tokens_saved_by_rewriter, avg_reduction_pct, rewrite_count
-    """
-    total_messages: int
-    total_tokens: int
-    avg_tokens_per_message: int
-    # Phase 2 placeholders — always 0 until the rewriter stores its data
-    tokens_saved_by_rewriter: int = 0
-    avg_reduction_pct: float = 0.0
-    rewrite_count: int = 0
+    total_queries:        int
+    total_chats:          int
+    total_tokens:         int
+    tokens_saved:         int
+    avg_reduction_pct:    float
+    category_breakdown:   Dict[str, int]   # {"dsa": 12, "math": 5, ...}
+    model_usage:          Dict[str, int]   # {"gemini-3.5-flash": 10, ...}
+    savings_timeline:     List[Dict]       # [{date, saved}, ...]
+
+
+class ModelStatusResponse(BaseModel):
+    models: List[Dict]   # [{name, status, latency_ms}]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ENDPOINT
+# METRICS ENDPOINT
 # ─────────────────────────────────────────────────────────────────────────────
 
-@router.get("/metrics", response_model=MetricsResponse, summary="Get token usage metrics for a session")
+@router.get("/metrics", response_model=MetricsResponse,
+            summary="Get analytics metrics for a session")
 async def get_metrics(
     session_id: str = Query(..., description="UUID4 browser session identifier")
 ) -> MetricsResponse:
-    """
-    Return aggregated token usage statistics for all chats in a session.
-
-    Args:
-        session_id: UUID4 string passed as a query parameter.
-    Returns:
-        MetricsResponse: token counts and (Phase 2+) rewriter savings stats.
-    Raises:
-        400: if session_id is not a valid UUID4.
-    """
     if not validate_session_id(session_id):
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid session_id: '{session_id}'. Must be a UUID4 string."
-        )
+        raise HTTPException(status_code=400, detail=f"Invalid session_id.")
 
     logger.info("GET /metrics | session=%s", session_id)
+    data = await queries.get_full_metrics_for_session(session_id)
+    return MetricsResponse(**data)
 
-    # Fetch real aggregate data from the DB
-    stats = await queries.get_token_stats_for_session(session_id)
 
-    return MetricsResponse(
-        total_messages=stats["total_messages"],
-        total_tokens=stats["total_tokens"],
-        avg_tokens_per_message=stats["avg_tokens_per_message"],
-        # Rewriter fields stay at 0 until Phase 2
-        tokens_saved_by_rewriter=0,
-        avg_reduction_pct=0.0,
-        rewrite_count=0,
-    )
+# ─────────────────────────────────────────────────────────────────────────────
+# MODEL STATUS ENDPOINT
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/model-status", response_model=ModelStatusResponse,
+            summary="Get live health status of each LLM provider")
+async def get_model_status() -> ModelStatusResponse:
+    """
+    Pings each provider with a minimal completion and measures latency.
+    Returns green/yellow/red status based on response time or failure.
+    """
+    import time
+    import litellm
+
+    PROVIDERS_TO_CHECK = [
+        ("Groq Llama-3.1-8b",   "groq/llama-3.1-8b-instant"),
+        ("Groq Qwen3-32b",       "groq/qwen/qwen3-32b"),
+        ("Gemini 3.5 Flash",     "gemini/gemini-3.5-flash"),
+    ]
+
+    async def ping(display_name: str, model: str) -> dict:
+        try:
+            t0 = time.monotonic()
+            await litellm.acompletion(
+                model=model,
+                messages=[{"role": "user", "content": "hi"}],
+                max_tokens=1,
+                temperature=0,
+            )
+            ms = int((time.monotonic() - t0) * 1000)
+            status = "green" if ms < 3000 else "yellow"
+            return {"name": display_name, "model": model, "status": status, "latency_ms": ms}
+        except Exception as e:
+            logger.warning("Model ping failed for %s: %s", model, str(e)[:80])
+            return {"name": display_name, "model": model, "status": "red", "latency_ms": -1}
+
+    results = await asyncio.gather(*[ping(n, m) for n, m in PROVIDERS_TO_CHECK])
+    return ModelStatusResponse(models=list(results))

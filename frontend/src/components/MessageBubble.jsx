@@ -14,15 +14,16 @@ import styles from './MessageBubble.module.css';
 
 /* ── Category configuration ─────────────────────────────────────────── */
 const CATEGORY_CONFIG = {
-  dsa:      { label: 'DSA',       icon: '🔗', color: 'purple' },
-  coding:   { label: 'Coding',    icon: '💻', color: 'cyan'   },
-  math:     { label: 'Math',      icon: '📐', color: 'emerald'},
-  science:  { label: 'Science',   icon: '🔬', color: 'amber'  },
-  summarize:{ label: 'Summarize', icon: '📋', color: 'rose'   },
-  evaluate: { label: 'Evaluate',  icon: '📊', color: 'amber'  },
-  general:  { label: 'General',   icon: '💬', color: 'slate'  },
-  fast:     { label: 'Fast',      icon: '⚡', color: 'violet' },
-  manual:   { label: 'Manual',    icon: '🎯', color: 'slate'  },
+  dsa:        { label: 'DSA',        icon: '🔗', color: 'purple'  },
+  coding:     { label: 'Coding',     icon: '💻', color: 'cyan'    },
+  math:       { label: 'Math',       icon: '📐', color: 'emerald' },
+  science:    { label: 'Science',    icon: '🔬', color: 'amber'   },
+  summarize:  { label: 'Summarize',  icon: '📋', color: 'rose'    },
+  evaluate:   { label: 'Evaluate',   icon: '📊', color: 'amber'   },
+  general:    { label: 'General',    icon: '💬', color: 'slate'   },
+  fast:       { label: 'Fast',       icon: '⚡', color: 'violet'  },
+  manual:     { label: 'Manual',     icon: '🎯', color: 'slate'   },
+  web_search: { label: 'Web Search', icon: '🌐', color: 'sky'     },
 };
 
 /* ── Model display name shortener ───────────────────────────────────── */
@@ -133,8 +134,8 @@ function UserBubble({ content }) {
   );
 }
 
-/* ── Assistant Bubble ────────────────────────────────────────────────── */
-function AssistantBubble({ content, categories_used, models_used, model_used, reduction_pct }) {
+/* ── Assistant Bubble ──────────────────────────────────────── */
+function AssistantBubble({ content, categories_used, models_used, model_used, reduction_pct, isStreaming }) {
   const isAggregated = model_used === 'aggregated';
 
   return (
@@ -153,6 +154,8 @@ function AssistantBubble({ content, categories_used, models_used, model_used, re
           >
             {content}
           </ReactMarkdown>
+          {/* Blinking cursor while streaming */}
+          {isStreaming && <span className={styles.streamCursor} aria-hidden="true">▌</span>}
         </div>
 
         {/* Metadata badges row */}
@@ -195,11 +198,12 @@ function AssistantBubble({ content, categories_used, models_used, model_used, re
           )}
 
           {/* Token savings chip */}
-          {reduction_pct > 0 && (
+          {reduction_pct > 0.5 && (
             <span className={styles.savingsChip} title="Tokens saved by Rewriter">
-              ✂️ -{reduction_pct}% tokens
+              ✂️ -{Number(reduction_pct).toFixed(1)}% tokens
             </span>
           )}
+
 
           <span className={styles.time}>{now()}</span>
         </div>
@@ -225,8 +229,8 @@ export function ThinkingBubble() {
   );
 }
 
-/* ── Main Export ─────────────────────────────────────────────────────── */
-export default function MessageBubble({ message }) {
+/* ── Main Export ────────────────────────────────────────── */
+export default function MessageBubble({ message, isStreaming }) {
   if (message.role === 'user') {
     return <UserBubble content={message.content} />;
   }
@@ -237,6 +241,7 @@ export default function MessageBubble({ message }) {
       models_used={message.models_used}
       model_used={message.model_used}
       reduction_pct={message.reduction_pct}
+      isStreaming={isStreaming}
     />
   );
 }

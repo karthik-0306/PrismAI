@@ -3,6 +3,10 @@
  *
  * Left panel: logo, new chat button, list of past conversations.
  */
+import React, { useState, useEffect } from 'react';
+import SystemHealth from './SystemHealth';
+import { useSession } from '../hooks/useSession';
+import { searchChats } from '../api/chat';
 import styles from './Sidebar.module.css';
 
 const MODEL_OPTIONS = [
@@ -50,7 +54,38 @@ export default function Sidebar({
   onModelChange,
   rewriterEnabled,
   onRewriterToggle,
+  onViewAnalytics,
+  onDeleteChat,
 }) {
+  const sessionId = useSession();
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState([]);
+  const [isSearching, setIsSearching] = useState(false);
+
+  useEffect(() => {
+    if (!searchQuery.trim()) {
+      setSearchResults([]);
+      setIsSearching(false);
+      return;
+    }
+
+    const timer = setTimeout(async () => {
+      setIsSearching(true);
+      try {
+        const results = await searchChats(sessionId, searchQuery);
+        setSearchResults(results);
+      } catch (err) {
+        console.error("Search failed:", err);
+      } finally {
+        setIsSearching(false);
+      }
+    }, 400);
+
+    return () => clearTimeout(timer);
+  }, [searchQuery, sessionId]);
+
+  const displayedChats = searchQuery.trim() ? searchResults : chats;
+
   return (
     <aside className={styles.sidebar} aria-label="Sidebar">
       {/* Logo */}
@@ -66,11 +101,23 @@ export default function Sidebar({
       <button
         id="btn-new-chat"
         className={styles.newChatBtn}
+        style={{ marginBottom: '8px' }}
         onClick={onNewChat}
         aria-label="Start new chat"
       >
         <span className={styles.newChatIcon}>+</span>
         New Chat
+      </button>
+
+      {/* Analytics Dashboard */}
+      <button
+        id="btn-analytics"
+        className={styles.analyticsBtn}
+        onClick={onViewAnalytics}
+        aria-label="View Analytics Dashboard"
+      >
+        <span className={styles.analyticsIcon}>📊</span>
+        Analytics Dashboard
       </button>
 
       {/* Model Selector */}
@@ -115,28 +162,64 @@ export default function Sidebar({
         </button>
       </div>
 
+      <SystemHealth />
+
       {/* Chat history */}
       <div className={styles.historyHeader}>
         <span className={styles.sectionLabel}>Conversations</span>
-        <span className={styles.chatCount}>{chats.length}</span>
+        <span className={styles.chatCount}>{displayedChats.length}</span>
+      </div>
+
+      <div className={styles.searchWrap}>
+        <span className={styles.searchIcon}>🔍</span>
+        <input
+          type="text"
+          className={styles.searchInput}
+          placeholder="Search chats..."
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+          aria-label="Search conversations"
+        />
       </div>
 
       <nav className={styles.chatList} aria-label="Chat history">
-        {chats.length === 0 && (
-          <p className={styles.emptyChatMsg}>No conversations yet</p>
-        )}
-        {chats.map((chat) => (
-          <button
-            key={chat.chat_id}
-            id={`chat-${chat.chat_id}`}
-            className={`${styles.chatItem} ${chat.chat_id === activeChatId ? styles.chatItemActive : ''}`}
-            onClick={() => onSelectChat(chat.chat_id)}
-            aria-current={chat.chat_id === activeChatId ? 'page' : undefined}
-          >
-            <span className={styles.chatDot} />
-            <span className={styles.chatTitle}>{chat.title}</span>
-            <span className={styles.chatDate}>{formatDate(chat.created_at)}</span>
-          </button>
+        {isSearching ? (
+          <p className={styles.emptyChatMsg}>Searching...</p>
+        ) : displayedChats.length === 0 ? (
+          <p className={styles.emptyChatMsg}>
+            {searchQuery.trim() ? "No results found" : "No conversations yet"}
+          </p>
+        ) : null}
+
+        {!isSearching && displayedChats.map((chat) => (
+          <div key={chat.chat_id} className={styles.chatItemWrapper}>
+            <button
+              id={`chat-${chat.chat_id}`}
+              className={`${styles.chatItem} ${chat.chat_id === activeChatId ? styles.chatItemActive : ''}`}
+              onClick={() => {
+                onSelectChat(chat.chat_id);
+                setSearchQuery(''); // clear search on selection
+              }}
+              aria-current={chat.chat_id === activeChatId ? 'page' : undefined}
+            >
+              <span className={styles.chatDot} />
+              <span className={styles.chatTitle}>{chat.title}</span>
+              <span className={styles.chatDate}>{formatDate(chat.created_at)}</span>
+            </button>
+            <button
+              className={styles.deleteBtn}
+              onClick={(e) => {
+                e.stopPropagation();
+                if (window.confirm('Delete this chat?')) {
+                  onDeleteChat(chat.chat_id);
+                }
+              }}
+              aria-label="Delete chat"
+              title="Delete chat"
+            >
+              🗑️
+            </button>
+          </div>
         ))}
       </nav>
 

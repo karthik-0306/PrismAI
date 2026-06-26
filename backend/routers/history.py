@@ -96,7 +96,24 @@ async def get_chats(
     ]
 
 
+@router.get("/chats/search", response_model=List[ChatSummary], summary="Search chats by keyword")
+async def search_chats_api(
+    q: str = Query(..., description="Search keyword"),
+    session_id: str = Query(..., description="UUID4 browser session identifier")
+) -> List[ChatSummary]:
+    if not validate_session_id(session_id):
+        raise HTTPException(status_code=400, detail="Invalid session_id.")
+
+    logger.info("GET /chats/search | q='%s' | session=%s", q, session_id)
+    chats = await queries.search_chats(session_id, q)
+    return [
+        ChatSummary(chat_id=c.chat_id, title=c.title, created_at=c.created_at)
+        for c in chats
+    ]
+
+
 @router.get(
+
     "/chats/{chat_id}/messages",
     response_model=List[MessageItem],
     summary="Get all messages in a chat"
@@ -154,3 +171,19 @@ async def get_messages(chat_id: str) -> List[MessageItem]:
         )
         for msg in messages
     ]
+
+@router.delete("/chats/{chat_id}", summary="Delete a chat")
+async def delete_chat_api(chat_id: str):
+    """
+    Delete a chat and all of its messages from the database.
+    """
+    from backend.utils.session import validate_chat_id
+    if not validate_chat_id(chat_id):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid chat_id: '{chat_id}'. Must be a UUID4 string."
+        )
+
+    logger.info("DELETE /chats/%s", chat_id)
+    await queries.delete_chat(chat_id)
+    return {"status": "success", "message": "Chat deleted successfully"}

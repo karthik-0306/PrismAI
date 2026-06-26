@@ -77,6 +77,35 @@
   color: var(--violet);
 }
 
+.analyticsBtn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 14px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+  margin-bottom: 16px;
+  font-family: inherit;
+}
+
+.analyticsBtn:hover {
+  background: rgba(124,58,237,0.1);
+  border-color: rgba(124,58,237,0.4);
+  color: var(--text-primary);
+}
+
+.analyticsIcon {
+  font-size: 16px;
+  line-height: 1;
+}
+
 /* ── Section label ────────────────────────────────── */
 .section { margin-bottom: 14px; }
 
@@ -203,6 +232,38 @@
   padding: 0 2px;
 }
 
+.searchWrap {
+  margin-bottom: 10px;
+  position: relative;
+}
+
+.searchInput {
+  width: 100%;
+  padding: 8px 10px 8px 28px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-family: inherit;
+  transition: all 0.2s;
+}
+
+.searchInput:focus {
+  outline: none;
+  border-color: rgba(124,58,237,0.5);
+  box-shadow: 0 0 0 2px rgba(124,58,237,0.12);
+}
+
+.searchIcon {
+  position: absolute;
+  left: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
 .chatCount {
   font-size: 10px;
   font-weight: 600;
@@ -278,6 +339,39 @@
   color: var(--text-muted);
   white-space: nowrap;
   flex-shrink: 0;
+}
+
+.chatItemWrapper {
+  display: flex;
+  position: relative;
+  width: 100%;
+}
+
+.chatItemWrapper .chatItem {
+  flex: 1;
+}
+
+.deleteBtn {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: transparent;
+  border: none;
+  font-size: 14px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.2s;
+  padding: 4px;
+  border-radius: 4px;
+}
+
+.deleteBtn:hover {
+  background: rgba(255, 0, 0, 0.1);
+}
+
+.chatItemWrapper:hover .deleteBtn {
+  opacity: 1;
 }
 
 /* ── Footer ───────────────────────────────────────── */

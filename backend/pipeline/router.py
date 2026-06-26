@@ -45,7 +45,7 @@ UTILITY_FALLBACK = "groq/llama-3.1-8b-instant"
 
 # ── Known valid categories ─────────────────────────────────────────────────────
 # If the LLM returns a category not in this set, we normalize it to "general".
-VALID_CATEGORIES = {"dsa", "coding", "reasoning", "math", "summarize", "evaluate", "general", "fast"}
+VALID_CATEGORIES = {"dsa", "coding", "reasoning", "math", "summarize", "evaluate", "general", "fast", "web_search"}
 
 # ── Classification prompt ──────────────────────────────────────────────────────
 # This is the exact instruction we send to the utility LLM.
@@ -55,9 +55,14 @@ VALID_CATEGORIES = {"dsa", "coding", "reasoning", "math", "summarize", "evaluate
 # The LLM must follow the PRIORITY RULES — no free interpretation.
 CLASSIFICATION_PROMPT = """\
 You are a strict query classifier for an AI routing system.
-Classify the user's query into one or more of these 8 categories:
+Classify the user's query into one or more of these 9 categories:
 
 CATEGORY DEFINITIONS (memorize these boundaries exactly):
+- web_search : The query asks about CURRENT EVENTS, real-time information, news, live data
+              (prices, weather, scores), or explicitly says "search the web", "look up",
+              "what is happening now", "latest", "today", "recent", "2024", "2025".
+              IMPORTANT: Use web_search for any information that a static AI model likely
+              does NOT know because it happened after its training cutoff.
 - dsa       : Data structures (arrays, linked lists, trees, graphs, stacks, queues, heaps, tries)
               OR algorithms (sorting, searching, dynamic programming, greedy, backtracking, recursion)
               OR complexity analysis (Big-O, time/space complexity)
@@ -73,16 +78,18 @@ CATEGORY DEFINITIONS (memorize these boundaries exactly):
 - evaluate  : The user is asking to EVALUATE, SCORE, GRADE, RATE, or CRITIQUE a provided piece of text, code, or a query-response pair.
               This is a META task — it wraps any topic (e.g. evaluating a binary tree explanation is STILL evaluate, not dsa).
               Key triggers: "evaluate this", "score this", "rate this response", "critique this code", "provide an evaluation report".
-- fast      : Trivial factual lookups, simple definitions, yes/no questions, unit conversions
+- fast      : Trivial factual lookups, simple definitions, yes/no questions, unit conversions.
+              NOT for anything requiring current/real-time data — that is web_search.
 - general   : Anything that does not fit any of the above categories
 
 PRIORITY RULES (apply in this strict order):
-1. If the query asks to EVALUATE, SCORE, RATE, GRADE, or CRITIQUE something → use evaluate ONLY. Never split evaluate with dsa/math/coding.
-2. If the query involves data structures OR algorithms OR Big-O → use dsa ONLY, even if writing code is required.
-3. If the query asks to summarize a given text → use summarize ONLY for the whole request (one item).
-4. If the query asks to prove OR compute mathematically → use math ONLY (not reasoning).
-5. Only split if the query has TWO clearly INDEPENDENT intents from DIFFERENT categories.
-6. Never duplicate the same sub_query under two different categories.
+1. If the query asks about CURRENT EVENTS, NEWS, LIVE PRICES, TODAY'S information, or uses words like "latest", "recent", "now", "today" → use web_search ONLY.
+2. If the query asks to EVALUATE, SCORE, RATE, GRADE, or CRITIQUE something → use evaluate ONLY. Never split evaluate with dsa/math/coding.
+3. If the query involves data structures OR algorithms OR Big-O → use dsa ONLY, even if writing code is required.
+4. If the query asks to summarize a given text → use summarize ONLY for the whole request (one item).
+5. If the query asks to prove OR compute mathematically → use math ONLY (not reasoning).
+6. Only split if the query has TWO clearly INDEPENDENT intents from DIFFERENT categories.
+7. Never duplicate the same sub_query under two different categories.
 
 OUTPUT FORMAT:
 Respond ONLY with a valid JSON array. No explanation. No markdown code fences. No extra text.
@@ -92,6 +99,15 @@ Respond ONLY with a valid JSON array. No explanation. No markdown code fences. N
 ]
 
 EXAMPLES:
+Query: "What is the latest news about OpenAI?"
+Output: [{{"category": "web_search", "sub_query": "What is the latest news about OpenAI?"}}]
+
+Query: "What is the current price of Bitcoin?"
+Output: [{{"category": "web_search", "sub_query": "What is the current price of Bitcoin?"}}]
+
+Query: "Search the web for best Python libraries in 2025"
+Output: [{{"category": "web_search", "sub_query": "best Python libraries in 2025"}}]
+
 Query: "Explain binary search step by step"
 Output: [{{"category": "dsa", "sub_query": "Explain binary search step by step"}}]
 
