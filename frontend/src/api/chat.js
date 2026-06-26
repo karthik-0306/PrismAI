@@ -2,10 +2,13 @@
  * src/api/chat.js
  *
  * All HTTP calls to the FastAPI backend.
- * Uses a relative URL so that in development, Vite's proxy handles CORS.
+ *
+ * In development: requests go to /api and Vite's proxy forwards them to localhost:8000
+ * In production (Vercel): VITE_API_BASE_URL is set to the Render backend URL
+ *   e.g. https://prismai-backend.onrender.com/api
  */
 
-const BASE = '/api';
+const BASE = import.meta.env.VITE_API_BASE_URL ?? '/api';
 
 /**
  * Stream a chat message via Server-Sent Events.

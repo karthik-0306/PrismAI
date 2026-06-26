@@ -58,18 +58,30 @@ app = FastAPI(
 )
 
 # ── CORS Middleware Configuration ──────────────────────────────────────────────
-# Configured specifically for the React + Vite development server (port 5173)
+# In development: allow Vite dev server (localhost:5173)
+# In production (Render): allow the deployed Vercel frontend URL
+# Set FRONTEND_URL env var on Render to your Vercel app URL.
+import os
+
+_frontend_url = os.getenv("FRONTEND_URL", "").strip()
+
 origins = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
 ]
 
+# Add the production Vercel URL if set (e.g. https://prism-ai.vercel.app)
+if _frontend_url:
+    origins.append(_frontend_url)
+    # Also allow without trailing slash
+    origins.append(_frontend_url.rstrip("/"))
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["*"],  # Allow all HTTP methods (GET, POST, etc.)
-    allow_headers=["*"],  # Allow all request headers
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # ── Register Routers ──────────────────────────────────────────────────────────
