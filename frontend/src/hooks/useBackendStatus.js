@@ -44,13 +44,18 @@ export function useBackendStatus() {
         setStatus('waking');
         // Keep polling until it's alive
         pollTimer = setInterval(async () => {
+          const pollController = new AbortController();
+          const pollTimeoutId = setTimeout(() => pollController.abort(), 5000);
+          
           try {
-            const r = await fetch(HEALTH_URL, { signal: AbortSignal.timeout(5000) });
+            const r = await fetch(HEALTH_URL, { signal: pollController.signal });
+            clearTimeout(pollTimeoutId);
             if (!cancelled && r.ok) {
               setStatus('ready');
               clearInterval(pollTimer);
             }
           } catch {
+            clearTimeout(pollTimeoutId);
             // Still waking up — keep polling
           }
         }, POLL_INTERVAL_MS);
