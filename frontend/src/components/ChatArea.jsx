@@ -150,8 +150,12 @@ export default function ChatArea({ messages, isThinking, isStreaming, onSend, ac
             rows={1}
             onKeyDown={handleKeyDown}
             onInput={(e) => {
-              e.target.style.height = 'auto';
-              e.target.style.height = Math.min(e.target.scrollHeight, 140) + 'px';
+              // Defer synchronous layout thrashing (reflow) to fix INP blocking
+              const el = e.target;
+              requestAnimationFrame(() => {
+                el.style.height = 'auto';
+                el.style.height = Math.min(el.scrollHeight, 140) + 'px';
+              });
             }}
             aria-label="Message input"
             disabled={isThinking || isStreaming}

@@ -8,13 +8,16 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import Sidebar from './components/Sidebar';
 import ChatArea from './components/ChatArea';
 import AnalyticsDashboard from './components/AnalyticsDashboard';
+import ServerStatusBanner from './components/ServerStatusBanner';
 import { Toaster, toast } from 'react-hot-toast';
 import { streamMessage, sendMessage, fetchChats, fetchMessages } from './api/chat';
 import { useSession } from './hooks/useSession';
+import { useBackendStatus } from './hooks/useBackendStatus';
 import styles from './App.module.css';
 
 export default function App() {
   const sessionId = useSession();
+  const backendStatus = useBackendStatus();
 
   const [chats, setChats] = useState([]);
   const [activeChatId, setActiveChatId] = useState(null);
@@ -230,13 +233,16 @@ export default function App() {
       {currentView === 'analytics' ? (
         <AnalyticsDashboard />
       ) : (
-        <ChatArea
-          messages={messages}
-          isThinking={isThinking}
-          isStreaming={isStreaming}
-          onSend={handleSend}
-          activeChatTitle={activeChat?.title}
-        />
+        <div style={{ display: 'flex', flexDirection: 'column', flex: 1, overflow: 'hidden' }}>
+          <ServerStatusBanner status={backendStatus} />
+          <ChatArea
+            messages={messages}
+            isThinking={isThinking}
+            isStreaming={isStreaming}
+            onSend={handleSend}
+            activeChatTitle={activeChat?.title}
+          />
+        </div>
       )}
     </div>
   );

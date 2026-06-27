@@ -223,14 +223,6 @@ export default function Sidebar({
         ))}
       </nav>
 
-      {/* Footer */}
-      <div className={styles.footer}>
-        <div className={styles.footerBadge}>
-          <span className={styles.footerDot} />
-          Phase 3 Live
-        </div>
-        <span className={styles.footerVersion}>v0.3.0</span>
-      </div>
     </aside>
   );
 }
