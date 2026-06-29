@@ -37,7 +37,7 @@ function EmptyState() {
         Multi-agent intelligence that routes your questions<br/>to the best specialized model automatically.
       </p>
       <div className={styles.emptyChips}>
-        {['DSA & Algorithms', 'Mathematics', 'Coding', 'Science', 'Summarize'].map(c => (
+        {['DSA', 'Mathematics', 'Coding', 'Summarize', 'Quick Response', 'Reasoning', 'Evaluation'].map(c => (
           <span key={c} className={styles.emptyChip}>{c}</span>
         ))}
       </div>
