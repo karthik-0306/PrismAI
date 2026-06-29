@@ -172,7 +172,7 @@ export default function App() {
     } catch (err) {
       console.error(err);
       setMessages(prev => prev.map(m =>
-        m._id === tempAsstId ? { ...m, content: '⚠️ Error generating response.' } : m
+        m._id === tempAsstId ? { ...m, content: 'Error generating response.' } : m
       ));
       toast.error(err.message || 'Something went wrong');
     } finally {

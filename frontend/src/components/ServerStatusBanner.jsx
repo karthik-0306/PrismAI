@@ -34,7 +34,7 @@ export default function ServerStatusBanner({ status }) {
 
   const config = {
     waking: {
-      icon: '⏳',
+      icon: null,
       cls: styles.waking,
       title: 'Backend server is warming up',
       sub: `Free-tier cold start — usually takes 30–60 seconds. (${elapsed}s elapsed)`,
@@ -46,7 +46,7 @@ export default function ServerStatusBanner({ status }) {
       sub: 'All systems operational.',
     },
     error: {
-      icon: '⚠️',
+      icon: null,
       cls: styles.error,
       title: 'Cannot reach backend',
       sub: 'Please refresh the page or try again in a moment.',

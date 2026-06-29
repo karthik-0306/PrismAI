@@ -2,54 +2,55 @@
   flex: 1;
   display: flex;
   flex-direction: column;
-  padding: 2rem;
-  background-color: var(--bg-primary);
+  padding: 24px;
+  background-color: var(--bg-base);
   color: var(--text-primary);
   overflow-y: auto;
 }
 
 .header {
-  margin-bottom: 2rem;
+  margin-bottom: 24px;
 }
 
 .header h1 {
-  font-size: 1.5rem;
+  font-size: 22px;
   font-weight: 600;
   color: var(--text-primary);
-  margin-bottom: 0.5rem;
+  margin-bottom: 6px;
 }
 
 .header p {
   color: var(--text-secondary);
-  font-size: 0.95rem;
+  font-size: 14px;
 }
 
 .statsGrid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 1.5rem;
-  margin-bottom: 2rem;
+  gap: 16px;
+  margin-bottom: 24px;
 }
 
 .statCard {
-  background-color: var(--bg-secondary);
-  border: 1px solid var(--border-color);
-  border-radius: 12px;
-  padding: 1.5rem;
+  background-color: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 20px;
   display: flex;
   flex-direction: column;
 }
 
 .statLabel {
-  font-size: 0.85rem;
-  color: var(--text-secondary);
+  font-size: 11px;
+  color: var(--text-muted);
   text-transform: uppercase;
-  letter-spacing: 0.05em;
-  margin-bottom: 0.5rem;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+  margin-bottom: 8px;
 }
 
 .statValue {
-  font-size: 2rem;
+  font-size: 28px;
   font-weight: 700;
   color: var(--text-primary);
 }
@@ -61,24 +62,24 @@
 .chartsGrid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
-  gap: 1.5rem;
-  margin-bottom: 2rem;
+  gap: 16px;
+  margin-bottom: 24px;
 }
 
 .chartCard {
-  background-color: var(--bg-secondary);
-  border: 1px solid var(--border-color);
-  border-radius: 12px;
-  padding: 1.5rem;
+  background-color: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 20px;
   display: flex;
   flex-direction: column;
   min-height: 350px;
 }
 
 .chartCard h2 {
-  font-size: 1.1rem;
+  font-size: 15px;
   font-weight: 600;
-  margin-bottom: 1.5rem;
+  margin-bottom: 20px;
   color: var(--text-primary);
 }
 
@@ -95,11 +96,11 @@
   align-items: center;
   justify-content: center;
   color: var(--text-secondary);
-  font-size: 1rem;
+  font-size: 14px;
 }
 
 .error {
-  color: var(--error);
+  color: #ef4444;
 }
 
 .fullWidth {

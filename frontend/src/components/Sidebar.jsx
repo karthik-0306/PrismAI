@@ -4,13 +4,12 @@
  * Left panel: logo, new chat button, list of past conversations.
  */
 import React, { useState, useEffect } from 'react';
-import SystemHealth from './SystemHealth';
 import { useSession } from '../hooks/useSession';
 import { searchChats } from '../api/chat';
 import styles from './Sidebar.module.css';
 
 const MODEL_OPTIONS = [
-  { value: 'auto',                        label: '✦ Auto Route',       sub: 'Smart multi-agent routing'  },
+  { value: 'auto',                        label: 'Auto Route',         sub: 'Smart multi-agent routing'  },
   { value: 'groq/openai/gpt-oss-120b',    label: 'GPT-OSS 120B',       sub: 'Most powerful · Groq'        },
   { value: 'groq/qwen/qwen3-32b',         label: 'Qwen3 32B',          sub: 'Strong reasoning · Groq'     },
   { value: 'groq/llama-3.3-70b-versatile',label: 'Llama 3.3 70B',      sub: 'Balanced · Groq'             },
@@ -22,10 +21,9 @@ function PrismIcon() {
   return (
     <svg width="28" height="28" viewBox="0 0 28 28" fill="none" aria-hidden="true">
       <defs>
-        <linearGradient id="prism-grad" x1="0%" y1="0%" x2="100%" y2="100%">
-          <stop offset="0%" stopColor="#7c3aed"/>
-          <stop offset="50%" stopColor="#06b6d4"/>
-          <stop offset="100%" stopColor="#10b981"/>
+        <linearGradient id="prism-grad" x1="50%" y1="100%" x2="50%" y2="0%">
+          <stop offset="0%" stopColor="#a78bfa"/>
+          <stop offset="100%" stopColor="#67e8f9"/>
         </linearGradient>
       </defs>
       <polygon points="14,2 26,22 2,22" fill="url(#prism-grad)" opacity="0.9"/>
@@ -116,7 +114,6 @@ export default function Sidebar({
         onClick={onViewAnalytics}
         aria-label="View Analytics Dashboard"
       >
-        <span className={styles.analyticsIcon}>📊</span>
         Analytics Dashboard
       </button>
 
@@ -162,8 +159,6 @@ export default function Sidebar({
         </button>
       </div>
 
-      <SystemHealth />
-
       {/* Chat history */}
       <div className={styles.historyHeader}>
         <span className={styles.sectionLabel}>Conversations</span>
@@ -171,7 +166,6 @@ export default function Sidebar({
       </div>
 
       <div className={styles.searchWrap}>
-        <span className={styles.searchIcon}>🔍</span>
         <input
           type="text"
           className={styles.searchInput}
@@ -202,7 +196,6 @@ export default function Sidebar({
               }}
               aria-current={chat.chat_id === activeChatId ? 'page' : undefined}
             >
-              <span className={styles.chatDot} />
               <span className={styles.chatTitle}>{chat.title}</span>
               <span className={styles.chatDate}>{formatDate(chat.created_at)}</span>
             </button>
@@ -215,9 +208,10 @@ export default function Sidebar({
                 }
               }}
               aria-label="Delete chat"
-              title="Delete chat"
             >
-              🗑️
+              <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true">
+                <line x1="2" y1="2" x2="10" y2="10"/><line x1="10" y1="2" x2="2" y2="10"/>
+              </svg>
             </button>
           </div>
         ))}

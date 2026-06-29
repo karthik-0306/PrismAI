@@ -23,10 +23,9 @@ function EmptyState() {
       <div className={styles.emptyPrism} aria-hidden="true">
         <svg width="56" height="56" viewBox="0 0 56 56" fill="none">
           <defs>
-            <linearGradient id="eg" x1="0%" y1="0%" x2="100%" y2="100%">
-              <stop offset="0%" stopColor="#7c3aed"/>
-              <stop offset="50%" stopColor="#06b6d4"/>
-              <stop offset="100%" stopColor="#10b981"/>
+            <linearGradient id="eg" x1="50%" y1="100%" x2="50%" y2="0%">
+              <stop offset="0%" stopColor="#a78bfa"/>
+              <stop offset="100%" stopColor="#67e8f9"/>
             </linearGradient>
           </defs>
           <polygon points="28,4 52,44 4,44" fill="url(#eg)" opacity="0.85"/>
@@ -38,8 +37,8 @@ function EmptyState() {
         Multi-agent intelligence that routes your questions<br/>to the best specialized model automatically.
       </p>
       <div className={styles.emptyChips}>
-        {['🔗 DSA &amp; Algorithms', '📐 Mathematics', '💻 Coding', '🔬 Science', '📋 Summarize'].map(c => (
-          <span key={c} className={styles.emptyChip} dangerouslySetInnerHTML={{ __html: c }} />
+        {['DSA & Algorithms', 'Mathematics', 'Coding', 'Science', 'Summarize'].map(c => (
+          <span key={c} className={styles.emptyChip}>{c}</span>
         ))}
       </div>
     </div>
@@ -102,21 +101,22 @@ export default function ChatArea({ messages, isThinking, isStreaming, onSend, ac
       {/* Header */}
       <header className={styles.header}>
         <div className={styles.headerLeft}>
-          <span className={styles.headerIndicator} aria-hidden="true" />
           <h2 className={styles.headerTitle}>{activeChatTitle || 'New Chat'}</h2>
         </div>
         <div className={styles.headerRight}>
           {messages.length > 0 && (
             <button className={styles.exportBtn} onClick={handleExport} aria-label="Export chat to Markdown">
-              📥 Export
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+              </svg>
+              Export
             </button>
           )}
           {savingsPct > 0 && (
             <span className={styles.headerSavings} title={`${savedTokens} tokens saved across session`}>
-              ⚡ {savingsPct}% compression
+              -{savingsPct}% tokens
             </span>
           )}
-          <span className={styles.headerTag}>Phase 3 · Multi-Agent</span>
         </div>
       </header>
 

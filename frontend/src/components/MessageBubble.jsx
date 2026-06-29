@@ -165,7 +165,6 @@ function AssistantBubble({ content, categories_used, models_used, model_used, re
             const cfg = CATEGORY_CONFIG[cat] || { label: cat, icon: '◆', color: 'slate' };
             return (
               <span key={cat} className={`${styles.badge} ${styles[`badge-${cfg.color}`]}`}>
-                <span className={styles.badgeIcon}>{cfg.icon}</span>
                 {cfg.label}
               </span>
             );
@@ -174,7 +173,6 @@ function AssistantBubble({ content, categories_used, models_used, model_used, re
           {/* Model chip(s) */}
           {models_used?.length > 0 && !isAggregated && (
             <span className={styles.modelChip} title={models_used[0]}>
-              <span className={styles.chipDot} />
               {shortModelName(models_used[0])}
             </span>
           )}
@@ -194,13 +192,13 @@ function AssistantBubble({ content, categories_used, models_used, model_used, re
 
           {/* Manual chip */}
           {categories_used?.includes('manual') && (
-            <span className={styles.manualChip}>🎯 Manual</span>
+            <span className={styles.manualChip}>Manual</span>
           )}
 
           {/* Token savings chip */}
           {reduction_pct > 0.5 && (
             <span className={styles.savingsChip} title="Tokens saved by Rewriter">
-              ✂️ -{Number(reduction_pct).toFixed(1)}% tokens
+              -{Number(reduction_pct).toFixed(1)}% tokens
             </span>
           )}
 

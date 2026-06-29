@@ -46,7 +46,6 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  box-shadow: 0 0 16px rgba(124, 58, 237, 0.35);
   margin-top: 2px;
 }
 
@@ -271,20 +270,6 @@
   color: var(--amber);
   background: rgba(245, 158, 11, 0.1);
   border: 1px solid rgba(245, 158, 11, 0.2);
-}
-
-.chipDot {
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: var(--amber);
-  box-shadow: 0 0 6px var(--amber);
-  animation: pulse 2s ease-in-out infinite;
-}
-
-@keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50%       { opacity: 0.4; }
 }
 
 /* ── Aggregate chip ──────────────────────────────── */
