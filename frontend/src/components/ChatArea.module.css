@@ -151,7 +151,7 @@
 
 /* ── Input bar ─────────────────────────────────────── */
 .inputBar {
-  padding: 12px 22px;
+  padding: 12px 22px 48px;
   border-top: 1px solid var(--border-subtle);
   background: rgba(10,10,15,0.8);
   backdrop-filter: blur(6px);

@@ -9,6 +9,7 @@ import Sidebar from './components/Sidebar';
 import ChatArea from './components/ChatArea';
 import AnalyticsDashboard from './components/AnalyticsDashboard';
 import ServerStatusBanner from './components/ServerStatusBanner';
+import FreeTierNotice from './components/FreeTierNotice';
 import { Toaster, toast } from 'react-hot-toast';
 import { streamMessage, sendMessage, fetchChats, fetchMessages } from './api/chat';
 import { useSession } from './hooks/useSession';
@@ -244,6 +245,7 @@ export default function App() {
           />
         </div>
       )}
+      <FreeTierNotice />
     </div>
   );
 }

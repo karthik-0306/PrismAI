@@ -37,7 +37,7 @@ export default function ServerStatusBanner({ status }) {
       icon: null,
       cls: styles.waking,
       title: 'Backend server is warming up',
-      sub: `Free-tier cold start — usually takes 30–60 seconds. (${elapsed}s elapsed)`,
+      sub: `Free-tier cold start — usually takes 1–2 minutes. (${elapsed}s elapsed)`,
     },
     ready: {
       icon: '✓',
