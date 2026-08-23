@@ -50,23 +50,6 @@ def _get_model():
     return _model
 
 
-async def warmup() -> None:
-    """
-    Eagerly import torch/sentence-transformers and load the model.
-
-    Importing torch + sentence-transformers takes ~40-50s the first time it
-    happens in a process (well beyond the model's own ~1s load-from-cache
-    time), independent of whether the model files are already cached on disk.
-    Left lazy, that cost lands on whichever user's message first triggers
-    the rewriter's similarity check — which after any cold start (e.g. Render
-    spinning back up from inactivity) is the very next real chat message,
-    making it look like the request hung or failed. Call this once during
-    app startup instead, so the cost is paid before any request is served.
-    """
-    loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, _get_model)
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # PUBLIC API
 # ─────────────────────────────────────────────────────────────────────────────

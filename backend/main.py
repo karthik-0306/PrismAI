@@ -10,14 +10,12 @@ Responsibilities:
   4. Configures clean logging format for development.
 """
 
-import asyncio
 import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.database.connection import initialize_database
-from backend.llm.embeddings import warmup as warmup_embeddings
 from backend.routers.chat import router as chat_router
 from backend.routers.history import router as history_router
 from backend.routers.metrics import router as metrics_router
@@ -46,27 +44,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error("Failed to initialize database during startup: %s", e, exc_info=True)
         raise e
-
-    # Warm up the embedding model in the background — importing torch/
-    # sentence-transformers takes ~40-50s the first time it happens in this
-    # process (much longer on a constrained host like Render's free tier).
-    # This MUST NOT be awaited here: awaiting it blocks the ASGI lifespan
-    # from completing, which blocks uvicorn from ever binding its port,
-    # which on Render fails the whole deploy with a port-scan timeout
-    # before the app is ever reachable. Firing it as a background task lets
-    # the server start accepting traffic immediately; the rewriter's first
-    # similarity check will just wait on the lazy-load if it beats this to
-    # the punch, exactly like before this warmup existed.
-    async def _warmup_in_background() -> None:
-        try:
-            logger.info("Warming up embedding model in background...")
-            await warmup_embeddings()
-            logger.info("Embedding model warmup complete.")
-        except Exception as e:
-            logger.error("Embedding model warmup failed (non-fatal): %s", e, exc_info=True)
-
-    asyncio.create_task(_warmup_in_background())
-
+        
     yield
     
     logger.info("Shutting down PrismAI FastAPI backend...")
