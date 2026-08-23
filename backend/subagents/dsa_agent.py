@@ -90,7 +90,7 @@ class DSASubagent:
                 messages=messages,
                 fallback_models=DSA_FALLBACK_MODELS,
                 temperature=0.1,  # Low temp for strict structural adherence
-                max_tokens=4096
+                max_tokens=4000
             )
             return result.content.strip()
         except Exception as e:
@@ -121,7 +121,7 @@ class DSASubagent:
             messages=messages,
             fallback_models=DSA_FALLBACK_MODELS,
             temperature=0.1,
-            max_tokens=4096,
+            max_tokens=4000,
         ):
             yield chunk, model_used
 

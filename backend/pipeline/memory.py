@@ -180,8 +180,7 @@ class MemoryInjector:
                 model=SUMMARY_MODEL,
                 messages=messages,
                 temperature=0.3,
-                max_tokens=1024,
-                low_reasoning=True,  # compression, not novel reasoning — keep the budget for output
+                max_tokens=1024
             )
             new_summary_text = result.content.strip()
             if not new_summary_text:

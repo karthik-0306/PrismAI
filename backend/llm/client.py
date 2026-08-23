@@ -47,31 +47,31 @@ litellm.suppress_debug_info = True  # don't print to stdout on every call
 ROUTE_MAP: dict[str, dict[str, str]] = {
     "dsa": {
         "primary":    "groq/openai/gpt-oss-120b",        # best reasoning on Groq
-        "fallback_1": "groq/qwen/qwen3.6-27b",           # strong coding/logic model
+        "fallback_1": "groq/qwen/qwen3.6-27b",             # strong coding/logic model
         "fallback_2": "gemini/gemini-3.5-flash",         # reliable last resort
     },
     "coding": {
-        "primary":    "groq/qwen/qwen3.6-27b",           # Qwen excels at code generation
+        "primary":    "groq/qwen/qwen3.6-27b",             # Qwen excels at code generation
         "fallback_1": "groq/openai/gpt-oss-120b",        # strong alternative
         "fallback_2": "gemini/gemini-3.5-flash",
     },
     "reasoning": {
         "primary":    "groq/openai/gpt-oss-120b",        # strongest free-tier reasoning
-        "fallback_1": "groq/qwen/qwen3.6-27b",           # capable general fallback
+        "fallback_1": "groq/qwen/qwen3.6-27b",   # capable general fallback
         "fallback_2": "gemini/gemini-3.5-flash",
     },
     "math": {
         "primary":    "groq/openai/gpt-oss-120b",        # numerical reasoning strength
-        "fallback_1": "groq/qwen/qwen3.6-27b",           # Qwen also strong at math
+        "fallback_1": "groq/qwen/qwen3.6-27b",             # Qwen also strong at math
         "fallback_2": "gemini/gemini-3.5-flash",
     },
     "summarize": {
         "primary":    "gemini/gemini-3.5-flash",         # fast, cheap, good at summaries
-        "fallback_1": "groq/openai/gpt-oss-20b",        # ultra-fast small model
+        "fallback_1": "groq/openai/gpt-oss-20b",      # ultra-fast small model
         "fallback_2": "groq/qwen/qwen3.6-27b",
     },
     "fast": {
-        "primary":    "groq/openai/gpt-oss-20b",        # lowest latency on Groq
+        "primary":    "groq/openai/gpt-oss-20b",      # lowest latency on Groq
         "fallback_1": "gemini/gemini-3.5-flash",
         "fallback_2": "groq/qwen/qwen3.6-27b",
     },
@@ -91,34 +91,16 @@ UTILITY_MODEL: dict[str, str] = {
 # Context window sizes per model (in tokens) — used by memory injector (Phase 4)
 # Values are conservative estimates; real limits are slightly higher.
 MODEL_CONTEXT_WINDOWS: dict[str, int] = {
-    "groq/openai/gpt-oss-120b":              131_000,
-    "groq/qwen/qwen3.6-27b":                 131_000,
-    "groq/openai/gpt-oss-20b":               131_000,
-    "gemini/gemini-3.5-flash":               100_000,
+    "groq/openai/gpt-oss-120b":              8_000,
+    "groq/qwen/qwen3.6-27b":                 32_000,
+    "groq/openai/gpt-oss-20b":               32_000,
+    "gemini/gemini-3.5-flash":             100_000,
 }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TYPED EXCEPTION
 # ─────────────────────────────────────────────────────────────────────────────
-
-def _reasoning_effort_for(model: str) -> str:
-    """
-    Return the lowest reasoning_effort value each provider actually accepts.
-
-    All three model families used in this app are "thinking" models that spend
-    part of their max_tokens budget on invisible reasoning tokens before writing
-    the visible answer. For short, structured utility calls (classification,
-    judging, aggregation — max_tokens 128-512) that reasoning budget can consume
-    the ENTIRE response, leaving nothing for the actual output. Each provider's
-    minimum valid value differs, so this cannot be a single constant:
-      - Gemini / Qwen3.x: "none" fully disables reasoning.
-      - Groq's GPT-OSS models reason unconditionally — "low" is as low as it goes.
-    """
-    if "gemini" in model or "qwen" in model:
-        return "none"
-    return "low"
-
 
 class LLMError(Exception):
     """
@@ -174,7 +156,6 @@ class LLMClient:
         temperature: float = 0.7,
         max_tokens: int = 2048,
         response_format: Optional[dict] = None,
-        low_reasoning: bool = False,
     ) -> CompletionResult:
         """
         Call the LLM with automatic fallback on failure.
@@ -189,11 +170,6 @@ class LLMClient:
             temperature:     Sampling temperature (0.0 = deterministic, 1.0 = creative).
             max_tokens:      Maximum tokens in the response.
             response_format: Optional dict specifying format (e.g. {"type": "json_object"}).
-            low_reasoning:   If True, ask the model to minimize invisible "thinking"
-                             tokens (see _reasoning_effort_for). Use this for short,
-                             structured utility calls where max_tokens is small and
-                             deep reasoning would starve the visible output instead
-                             of improving it.
         Returns:
             CompletionResult: typed object with content and token usage.
         Raises:
@@ -220,8 +196,6 @@ class LLMClient:
                 }
                 if response_format:
                     kwargs["response_format"] = response_format
-                if low_reasoning:
-                    kwargs["reasoning_effort"] = _reasoning_effort_for(attempt_model)
 
                 response = await litellm.acompletion(**kwargs)
 
@@ -273,7 +247,7 @@ class LLMClient:
         messages: list,
         fallback_models: Optional[list] = None,
         temperature: float = 0.7,
-        max_tokens: int = 4096,
+        max_tokens: int = 2048,
     ):
         """
         Stream tokens from the LLM, yielding (chunk: str, model_used: str) tuples.
@@ -415,7 +389,7 @@ def get_fallbacks_for_route(route_category: str) -> tuple[str, list]:
 def get_utility_model() -> tuple[str, list]:
     """
     Return the utility model config (used by rewriter and router classifiers).
-    These tasks need speed, not capability — gpt-oss-20b is ideal.
+    These tasks need speed, not capability — openai/gpt-oss-20b is ideal.
 
     Returns:
         tuple: (primary_model_string, [fallback_1])

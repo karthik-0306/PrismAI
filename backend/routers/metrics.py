@@ -69,10 +69,9 @@ async def get_model_status() -> ModelStatusResponse:
     import litellm
 
     PROVIDERS_TO_CHECK = [
-        ("Groq GPT-OSS-120B",   "groq/openai/gpt-oss-120b"),
-        ("Groq GPT-OSS-20B",    "groq/openai/gpt-oss-20b"),
-        ("Groq Qwen3.6-27b",    "groq/qwen/qwen3.6-27b"),
-        ("Gemini 3.5 Flash",    "gemini/gemini-3.5-flash"),
+        ("Groq GPT-OSS-20B",   "groq/openai/gpt-oss-20b"),
+        ("Groq Qwen3.6-27b",       "groq/qwen/qwen3.6-27b"),
+        ("Gemini 3.5 Flash",     "gemini/gemini-3.5-flash"),
     ]
 
     async def ping(display_name: str, model: str) -> dict:

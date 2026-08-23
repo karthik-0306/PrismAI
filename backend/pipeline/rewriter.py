@@ -40,13 +40,10 @@ logger = logging.getLogger(__name__)
 # 0.80 is the production threshold to ensure high semantic preservation while allowing fluff removal.
 SIMILARITY_THRESHOLD = 0.80
 
-# Utility model chain — fast and cheap, used for compression.
-# Groq primary, Gemini as fallback: Gemini's free-tier quota is shared across
-# every utility call in the pipeline (rewriter, router, judge, aggregator) plus
-# some answer routes, so it's the first thing to hit rate limits under load.
-REWRITE_PRIMARY   = "groq/openai/gpt-oss-20b"
+# Utility model chain — fast and cheap, used for compression
+REWRITE_PRIMARY   = "gemini/gemini-3.5-flash"
 REWRITE_FALLBACKS = [
-    "gemini/gemini-3.5-flash",
+    "groq/openai/gpt-oss-20b",
     "groq/qwen/qwen3.6-27b",
 ]
 
@@ -280,8 +277,7 @@ class QueryRewriter:
                 ],
                 fallback_models=REWRITE_FALLBACKS,
                 temperature=0.3,   # low temperature for consistent, conservative rewrites
-                max_tokens=768,    # rewrites are always shorter than the original
-                low_reasoning=True,  # compression, not novel reasoning — keep the budget for output
+                max_tokens=512,    # rewrites are always shorter than the original
             )
             candidate = result.content.strip()
 

@@ -171,7 +171,7 @@ class WebSearchSubagent:
                 messages=messages,
                 fallback_models=WEB_SEARCH_FALLBACKS,
                 temperature=1.0,   # Gemini requires temperature=1.0
-                max_tokens=4096,
+                max_tokens=2048,
             )
             return result.content.strip()
         except Exception as e:
@@ -207,6 +207,6 @@ class WebSearchSubagent:
             messages=messages,
             fallback_models=WEB_SEARCH_FALLBACKS,
             temperature=1.0,
-            max_tokens=4096,
+            max_tokens=2048,
         ):
             yield chunk, model_used

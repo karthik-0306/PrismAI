@@ -45,29 +45,6 @@ async def save_chat(chat_id: str, session_id: str, title: str) -> None:
     logger.debug("Saved chat %s for session %s", chat_id, session_id)
 
 
-async def chat_exists(chat_id: str) -> bool:
-    """
-    Check whether a chat_id actually has a row in the chats table.
-
-    The frontend caches chat_id in component state / localStorage and will
-    keep sending it on every message in that conversation. If the backend's
-    SQLite data was ever reset independently of the frontend (e.g. a host
-    with no persistent disk restarting), a client can hold a chat_id the
-    server no longer recognises — inserting a message against it would
-    violate the messages.chat_id foreign key. Callers use this to detect
-    that case and re-create the chat instead of letting the insert fail.
-
-    Args:
-        chat_id: UUID4 string to check.
-    Returns:
-        bool: True if a chats row with this chat_id exists.
-    """
-    async with get_db() as db:
-        cur = await db.execute("SELECT 1 FROM chats WHERE chat_id = ?", (chat_id,))
-        row = await cur.fetchone()
-        return row is not None
-
-
 async def get_all_chats_for_session(session_id: str) -> List[Chat]:
     """
     Retrieve all chats belonging to a browser session, ordered newest first.
@@ -475,14 +452,8 @@ async def get_full_metrics_for_session(session_id: str) -> dict:
         model_rows = await cur.fetchall()
         model_usage = {}
         for row in model_rows:
-            raw = row["model_used"] or "unknown"
-            # Subagent responses are stored as "subagent/dsa (groq/qwen/qwen3.6-27b)" —
-            # unwrap to the actual model string first, or the split below leaves a
-            # dangling ")" on the shortened name (e.g. "qwen3.6-27b)").
-            if "(" in raw and raw.endswith(")"):
-                raw = raw[raw.find("(") + 1 : -1]
-            # Shorten the model name for display: "groq/qwen/qwen3.6-27b" → "qwen3.6-27b"
-            name = raw.split("/")[-1]
+            # Shorten the model name for display: "groq/qwen/qwen3.6-27b" → "qwen3-32b"
+            name = (row["model_used"] or "unknown").split("/")[-1]
             model_usage[name] = model_usage.get(name, 0) + row["cnt"]
 
         # ── Daily savings timeline ────────────────────────────────────────────

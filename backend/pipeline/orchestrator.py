@@ -57,26 +57,23 @@ logger = logging.getLogger(__name__)
 # The LLMClient tries them in order automatically.
 # ─────────────────────────────────────────────────────────────────────────────
 ROUTE_MAP = {
-    "dsa":       {"primary": "groq/openai/gpt-oss-120b",       "fallback_1": "groq/qwen/qwen3.6-27b",        "fallback_2": "gemini/gemini-3.5-flash"},
-    "coding":    {"primary": "groq/qwen/qwen3.6-27b",          "fallback_1": "groq/openai/gpt-oss-120b",     "fallback_2": "gemini/gemini-3.5-flash"},
-    "reasoning": {"primary": "groq/openai/gpt-oss-120b",       "fallback_1": "groq/qwen/qwen3.6-27b",        "fallback_2": "gemini/gemini-3.5-flash"},
-    "math":      {"primary": "groq/openai/gpt-oss-120b",       "fallback_1": "groq/qwen/qwen3.6-27b",        "fallback_2": "gemini/gemini-3.5-flash"},
-    "summarize": {"primary": "gemini/gemini-3.5-flash",        "fallback_1": "groq/openai/gpt-oss-20b",      "fallback_2": "groq/qwen/qwen3.6-27b"},
-    "fast":      {"primary": "groq/openai/gpt-oss-20b",        "fallback_1": "gemini/gemini-3.5-flash",      "fallback_2": "groq/qwen/qwen3.6-27b"},
-    "general":   {"primary": "gemini/gemini-3.5-flash",        "fallback_1": "groq/qwen/qwen3.6-27b",        "fallback_2": "groq/openai/gpt-oss-20b"},
+    "dsa":       {"primary": "groq/openai/gpt-oss-120b",       "fallback_1": "groq/qwen/qwen3.6-27b",          "fallback_2": "gemini/gemini-3.5-flash"},
+    "coding":    {"primary": "groq/qwen/qwen3.6-27b",            "fallback_1": "groq/openai/gpt-oss-120b",     "fallback_2": "gemini/gemini-3.5-flash"},
+    "reasoning": {"primary": "groq/openai/gpt-oss-120b",       "fallback_1": "groq/qwen/qwen3.6-27b", "fallback_2": "gemini/gemini-3.5-flash"},
+    "math":      {"primary": "groq/openai/gpt-oss-120b",       "fallback_1": "groq/qwen/qwen3.6-27b",          "fallback_2": "gemini/gemini-3.5-flash"},
+    "summarize": {"primary": "gemini/gemini-3.5-flash",        "fallback_1": "groq/openai/gpt-oss-20b",    "fallback_2": "groq/qwen/qwen3.6-27b"},
+    "fast":      {"primary": "groq/openai/gpt-oss-20b",      "fallback_1": "gemini/gemini-3.5-flash",      "fallback_2": "groq/qwen/qwen3.6-27b"},
+    "general":   {"primary": "gemini/gemini-3.5-flash",        "fallback_1": "groq/qwen/qwen3.6-27b", "fallback_2": "groq/openai/gpt-oss-20b"},
     # web_search is handled entirely by WebSearchSubagent (no direct LLM route needed here)
 }
 
 # Priority order: cheapest/fastest first, most capable last.
-# Groq primary, Gemini as fallback: Gemini's free-tier quota is shared across
-# every utility call in the pipeline (rewriter, router, judge, aggregator) plus
-# some answer routes, so it's the first thing to hit rate limits under load.
 # All models are listed so that if the entire Groq service is down,
 # Gemini picks it up, and vice versa. Nothing is left unprotected.
-UTILITY_PRIMARY   = "groq/openai/gpt-oss-20b"
+UTILITY_PRIMARY   = "gemini/gemini-3.5-flash"
 UTILITY_FALLBACKS = [
-    "gemini/gemini-3.5-flash",
-    "groq/qwen/qwen3.6-27b",            # strong reasoning, good JSON compliance
+    "groq/openai/gpt-oss-20b",
+    "groq/qwen/qwen3.6-27b",              # strong reasoning, good JSON compliance
     "groq/openai/gpt-oss-120b",         # most capable — last resort for internal tasks
 ]
 
@@ -158,12 +155,8 @@ class Orchestrator:
         """
 
         # ── Step 1: Resolve or create chat ─────────────────────────────────
-        # A non-null chat_id doesn't guarantee the chat still exists server-side —
-        # e.g. the backend's SQLite data was reset independently of the frontend's
-        # cached chat_id. Re-create it rather than letting save_message's foreign
-        # key insert fail outright.
-        if chat_id is None or not await queries.chat_exists(chat_id):
-            chat_id = chat_id or generate_id()
+        if chat_id is None:
+            chat_id = generate_id()
             title   = self._make_title(message)
             await queries.save_chat(chat_id, session_id, title)
             logger.info("Created new chat %s for session %s", chat_id, session_id)
@@ -230,11 +223,8 @@ class Orchestrator:
         can attach badges (model used, category, savings) at the right moment.
         """
         # ── Step 1: Resolve or create chat + save user message ─────────────────
-        # See run()'s identical check: a non-null chat_id doesn't guarantee the
-        # chat still exists server-side (e.g. SQLite data reset independently
-        # of the frontend's cached chat_id).
-        if chat_id is None or not await queries.chat_exists(chat_id):
-            chat_id = chat_id or generate_id()
+        if chat_id is None:
+            chat_id = generate_id()
             title   = self._make_title(message)
             await queries.save_chat(chat_id, session_id, title)
             logger.info("Stream: Created new chat %s for session %s", chat_id, session_id)
@@ -268,7 +258,7 @@ class Orchestrator:
                 model=model_preference,
                 messages=prompt,
                 fallback_models=fallbacks,
-                max_tokens=4096,
+                max_tokens=2048,
             ):
                 if chunk:
                     full_response += chunk
@@ -348,7 +338,7 @@ class Orchestrator:
                 model=primary,
                 messages=prompt,
                 fallback_models=fallbacks,
-                max_tokens=4096,
+                max_tokens=2048,
             ):
                 if chunk:
                     full_response += chunk
@@ -460,7 +450,7 @@ class Orchestrator:
             messages=prompt,
             fallback_models=fallbacks,  # full quality-ordered fallback chain
             temperature=temperature,
-            max_tokens=4096,
+            max_tokens=2048,
         )
 
         # Save assistant response to DB
@@ -684,7 +674,7 @@ class Orchestrator:
             messages=prompt,
             fallback_models=fallbacks,
             temperature=temperature,
-            max_tokens=4096,
+            max_tokens=2048,
         )
 
         logger.info(
@@ -735,8 +725,7 @@ Respond ONLY with a JSON object, no explanation:
                 messages=messages,
                 fallback_models=UTILITY_FALLBACKS,  # full chain — all models as backup
                 temperature=0.0,   # deterministic judgment
-                max_tokens=256,    # judgment response is always short
-                low_reasoning=True,  # structured 1-line JSON — deep thinking only starves it
+                max_tokens=128,    # judgment response is always short
             )
             raw = result.content.strip()
 
@@ -806,8 +795,7 @@ Respond ONLY with the improved sub-task text. No explanation. No JSON."""
                 messages=messages,
                 fallback_models=UTILITY_FALLBACKS,  # full chain — all models as backup
                 temperature=0.3,   # slight creativity needed to produce a better sub-query
-                max_tokens=512,
-                low_reasoning=True,  # short rewrite task — deep thinking only starves it
+                max_tokens=256,
             )
             corrected_sub_query = resplit_result.content.strip()
             logger.info("Resplit produced corrected sub-query: %s", corrected_sub_query[:80])
@@ -876,8 +864,7 @@ Write the final combined answer now:"""
                 messages=messages,
                 fallback_models=UTILITY_FALLBACKS,  # full chain — all models as backup
                 temperature=0.7,   # some creativity for smooth synthesis
-                max_tokens=3072,
-                low_reasoning=True,  # synthesis, not novel reasoning — keep the budget for output
+                max_tokens=2048,
             )
             logger.info("Aggregation complete | %d tokens out", result.completion_tokens)
             return result.content
