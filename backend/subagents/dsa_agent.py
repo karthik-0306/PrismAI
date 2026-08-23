@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 # Primary model for complex algorithmic reasoning
 DSA_PRIMARY_MODEL = "groq/openai/gpt-oss-120b"
 DSA_FALLBACK_MODELS = [
-    "groq/llama-3.3-70b-versatile",
+    "groq/qwen/qwen3.6-27b",
     "gemini/gemini-3.5-flash"
 ]
 
@@ -90,7 +90,7 @@ class DSASubagent:
                 messages=messages,
                 fallback_models=DSA_FALLBACK_MODELS,
                 temperature=0.1,  # Low temp for strict structural adherence
-                max_tokens=4000
+                max_tokens=4096
             )
             return result.content.strip()
         except Exception as e:
@@ -121,7 +121,7 @@ class DSASubagent:
             messages=messages,
             fallback_models=DSA_FALLBACK_MODELS,
             temperature=0.1,
-            max_tokens=4000,
+            max_tokens=4096,
         ):
             yield chunk, model_used
 

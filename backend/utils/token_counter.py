@@ -58,7 +58,7 @@ def count_tokens(text: str, model: str = "") -> int:
 
     Args:
         text:  The string to count tokens for.
-        model: LiteLLM model string e.g. "groq/llama-3.1-8b-instant"
+        model: LiteLLM model string e.g. "groq/openai/gpt-oss-20b"
                or "gemini/gemini-3.5-flash". Can be empty string.
     Returns:
         int: estimated token count. Always >= 1 for non-empty text.

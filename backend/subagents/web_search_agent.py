@@ -28,7 +28,7 @@ TAVILY_API_URL = "https://api.tavily.com/search"
 # Model for synthesizing search results into a clean answer
 WEB_SEARCH_PRIMARY   = "gemini/gemini-3.5-flash"
 WEB_SEARCH_FALLBACKS = [
-    "groq/llama-3.3-70b-versatile",
+    "groq/qwen/qwen3.6-27b",
     "groq/openai/gpt-oss-120b",
 ]
 
@@ -171,7 +171,7 @@ class WebSearchSubagent:
                 messages=messages,
                 fallback_models=WEB_SEARCH_FALLBACKS,
                 temperature=1.0,   # Gemini requires temperature=1.0
-                max_tokens=2048,
+                max_tokens=4096,
             )
             return result.content.strip()
         except Exception as e:
@@ -207,6 +207,6 @@ class WebSearchSubagent:
             messages=messages,
             fallback_models=WEB_SEARCH_FALLBACKS,
             temperature=1.0,
-            max_tokens=2048,
+            max_tokens=4096,
         ):
             yield chunk, model_used

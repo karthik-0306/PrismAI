@@ -28,13 +28,13 @@ flowchart TD
     U([User]) -->|Raw Query| RW
 
     subgraph PREPROCESSING["Preprocessing Layer"]
-        RW["Query Rewriter\n(Gemini Flash / Llama 3.1 8B)\nStrips filler words\nProtects code blocks\n16.92% avg token reduction"]
+        RW["Query Rewriter\n(Gemini Flash / GPT-OSS 20B)\nStrips filler words\nProtects code blocks\n16.92% avg token reduction"]
     end
 
     RW -->|Compressed Query| SR
 
     subgraph ROUTING["Smart Router"]
-        SR["SmartRouter\n(Gemini Flash / Llama 3.1 8B)\nClassifies intent\nSplits compound queries"]
+        SR["SmartRouter\n(Gemini Flash / GPT-OSS 20B)\nClassifies intent\nSplits compound queries"]
     end
 
     SR -->|dsa| DSA
@@ -47,7 +47,7 @@ flowchart TD
         DSA["DSA Subagent\nAlgorithm Expert\nComplexity Analysis\nStep-by-Step Solutions"]
         WS["WebSearch Subagent\nTavily API — Real-time Data\nAuto Query Broadening\nSource-Cited Synthesis"]
         EV["Evaluator Subagent\nAI Judge Panel\nFactuality · Relevance\nGroundedness Scoring"]
-        LLM["Orchestrator LLM\nGPT-OSS 120B / Qwen3 32B\nGemini Flash / Llama 70B\n(via LiteLLM)"]
+        LLM["Orchestrator LLM\nGPT-OSS 120B / Qwen3.6 27B\nGemini Flash / GPT-OSS 20B\n(via LiteLLM)"]
     end
 
     DSA --> JD
@@ -89,11 +89,11 @@ PrismAI's `SmartRouter` classifies every query into one of 9 categories using a 
 | `dsa` | DSA Subagent | Algorithms, LeetCode, complexity analysis |
 | `web_search` | WebSearch Subagent | Real-time info, current events, prices |
 | `evaluate` | Evaluator Subagent | Scoring AI responses, factuality checks |
-| `coding` | GPT-OSS 120B | Debugging, refactoring, code generation |
-| `math` | Qwen3 32B | Proofs, calculus, numerical computation |
-| `reasoning` | Qwen3 32B | Logic puzzles, argument analysis |
-| `summarize` | Llama 70B | Condensing documents and text |
-| `fast` | Llama 8B Instant | Trivial one-liner answers |
+| `coding` | Qwen3.6 27B | Debugging, refactoring, code generation |
+| `math` | GPT-OSS 120B | Proofs, calculus, numerical computation |
+| `reasoning` | GPT-OSS 120B | Logic puzzles, argument analysis |
+| `summarize` | Gemini Flash | Condensing documents and text |
+| `fast` | GPT-OSS 20B | Trivial one-liner answers |
 | `general` | Gemini Flash | Everything else |
 
 ---
@@ -179,7 +179,7 @@ An interactive built-in dashboard (powered by **Recharts**) showing:
 | **Charts** | Recharts | Analytics dashboard |
 | **Backend** | FastAPI (Python 3.11) | API server, SSE streaming |
 | **LLM Gateway** | LiteLLM | Universal multi-provider LLM abstraction |
-| **LLM Providers** | Groq, Gemini, HuggingFace | Model inference |
+| **LLM Providers** | Groq, Gemini | Model inference |
 | **Web Search** | Tavily API | AI-optimised real-time search |
 | **Embeddings** | sentence-transformers (local) | Semantic similarity for memory |
 | **Database** | SQLite + aiosqlite | Async persistent storage |
@@ -256,7 +256,7 @@ PrismAI/
 
 - Python **3.11**
 - Node.js **18+**
-- API keys for [Groq](https://console.groq.com), [Gemini](https://aistudio.google.com), [Tavily](https://app.tavily.com), and [HuggingFace](https://huggingface.co/settings/tokens)
+- API keys for [Groq](https://console.groq.com), [Gemini](https://aistudio.google.com), and [Tavily](https://app.tavily.com)
 
 ### 1. Clone the repository
 
@@ -277,10 +277,7 @@ Edit `.env` with your API keys:
 GEMINI_API_KEY=your_gemini_key
 GROQ_API_KEY=your_groq_key
 TAVILY_API_KEY=your_tavily_key
-HF_TOKEN=your_huggingface_token
 ```
-
-> `HF_TOKEN` is required for HuggingFace model inference. Create a read-access token at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens).
 
 ### 3. Start the backend
 
@@ -322,7 +319,7 @@ PrismAI uses a split-stack deployment:
 | **Backend** | Render | [prismai-backend-mruh.onrender.com](https://prismai-backend-mruh.onrender.com) |
 
 **Environment variables required on Render:**
-`GEMINI_API_KEY`, `GROQ_API_KEY`, `TAVILY_API_KEY`, `HF_TOKEN`, `FRONTEND_URL` (set to your Vercel URL to allow CORS).
+`GEMINI_API_KEY`, `GROQ_API_KEY`, `TAVILY_API_KEY`, `FRONTEND_URL` (set to your Vercel URL to allow CORS).
 
 > The backend runs on Render's free tier, which cold-starts after inactivity. The first request may take 30–60 seconds; the frontend displays a status banner during this period.
 
@@ -333,8 +330,8 @@ PrismAI uses a split-stack deployment:
 | Metric | Value |
 |---|---|
 | Intent categories | 9 |
-| LLM providers | 3 (Groq, Gemini, HuggingFace) |
-| Available models | 6 |
+| LLM providers | 2 (Groq, Gemini) |
+| Available models | 4 |
 | Avg token reduction (Query Rewriter) | **16.92%** |
 | Evaluation dataset | 100 queries |
 | Streaming protocol | Server-Sent Events (SSE) |

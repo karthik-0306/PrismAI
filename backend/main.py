@@ -16,6 +16,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.database.connection import initialize_database
+from backend.llm.embeddings import warmup as warmup_embeddings
 from backend.routers.chat import router as chat_router
 from backend.routers.history import router as history_router
 from backend.routers.metrics import router as metrics_router
@@ -44,7 +45,17 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error("Failed to initialize database during startup: %s", e, exc_info=True)
         raise e
-        
+
+    # Warm up the embedding model now — importing torch/sentence-transformers
+    # takes ~40-50s the first time it happens in this process. Done here so
+    # that cost lands on startup, not on some user's first chat message.
+    try:
+        logger.info("Warming up embedding model...")
+        await warmup_embeddings()
+        logger.info("Embedding model warmup complete.")
+    except Exception as e:
+        logger.error("Embedding model warmup failed (non-fatal): %s", e, exc_info=True)
+
     yield
     
     logger.info("Shutting down PrismAI FastAPI backend...")

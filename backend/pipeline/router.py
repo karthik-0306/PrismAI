@@ -5,7 +5,7 @@ The SmartRouter reads the user's query and decides:
   1. What category of task is it? (dsa, coding, math, reasoning, summarize, fast, general)
   2. If the query contains multiple unrelated intents, split them into separate sub-queries.
 
-This module calls the CHEAP utility LLM (llama-3.1-8b-instant) — never the expensive models.
+This module calls the CHEAP utility LLM (gpt-oss-20b) — never the expensive models.
 The expensive models are only called by the orchestrator AFTER the router has decided the route.
 
 How it works:
@@ -40,8 +40,10 @@ logger = logging.getLogger(__name__)
 # ── Utility model config ───────────────────────────────────────────────────────
 # These are the CHEAP models used only for internal tasks (classify, judge, aggregate).
 # They are fast and inexpensive — NOT used to answer the user's actual question.
-UTILITY_PRIMARY  = "gemini/gemini-3.5-flash"
-UTILITY_FALLBACK = "groq/llama-3.1-8b-instant"
+# Groq primary, Gemini as fallback: Gemini's free-tier quota is shared across
+# every utility call in the pipeline, so it's the first thing to hit rate limits.
+UTILITY_PRIMARY  = "groq/openai/gpt-oss-20b"
+UTILITY_FALLBACK = "gemini/gemini-3.5-flash"
 
 # ── Known valid categories ─────────────────────────────────────────────────────
 # If the LLM returns a category not in this set, we normalize it to "general".
@@ -174,7 +176,8 @@ class SmartRouter:
                 messages=messages,
                 fallback_models=[UTILITY_FALLBACK],
                 temperature=0.0,    # 0.0 = deterministic, consistent JSON output
-                max_tokens=512,     # classification response is always short
+                max_tokens=768,     # classification response is always short
+                low_reasoning=True, # structured JSON output — deep thinking only starves it
             )
             raw_text = result.content.strip()
             logger.debug("Router raw LLM output: %s", raw_text)

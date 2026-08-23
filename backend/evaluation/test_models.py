@@ -6,10 +6,10 @@ async def test():
     client = LLMClient()
     message = "I have 1000 documents to download from a website. So as not to overload the servers 1) at what rate should I download? Just pick a good rate for the sake of the question then answer:2)  how long will it take to download all the files?"
     
-    print("Testing Llama 3.1 8B:")
+    print("Testing GPT-OSS 20B:")
     try:
         r1 = await client.async_complete(
-            model="groq/llama-3.1-8b-instant",
+            model="groq/openai/gpt-oss-20b",
             messages=[
                 {"role": "system", "content": _COMPRESS_SYSTEM},
                 {"role": "user", "content": f"<query>\n{message}\n</query>"}
@@ -18,7 +18,7 @@ async def test():
         )
         print(r1.content)
     except Exception as e:
-        print("Llama failed:", e)
+        print("GPT-OSS 20B failed:", e)
 
     print("\n----------------\nTesting Gemini 3.5 Flash:")
     try:

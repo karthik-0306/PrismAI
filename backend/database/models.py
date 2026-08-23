@@ -41,7 +41,7 @@ class Message:
     is_summarized: bool         # True once this message has been rolled into a summary
     created_at: str             # ISO-8601 timestamp string
     # JSON-serialized list of all models that contributed to this response.
-    # e.g. '["groq/openai/gpt-oss-120b","groq/qwen/qwen3-32b"]'
+    # e.g. '["groq/openai/gpt-oss-120b","groq/qwen/qwen3.6-27b"]'
     # None for user messages and rows that predate this column (schema migration v2).
     models_used_json: Optional[str] = None
     original_tokens: int = 0

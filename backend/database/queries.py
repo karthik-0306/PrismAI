@@ -148,7 +148,7 @@ async def save_message(
         route_category: Router classification result (None for user messages).
                         For compound responses, stored as CSV e.g. 'dsa,math'.
         models_used:    Full list of model strings that contributed to this response.
-                        e.g. ['groq/openai/gpt-oss-120b', 'groq/qwen/qwen3-32b'].
+                        e.g. ['groq/openai/gpt-oss-120b', 'groq/qwen/qwen3.6-27b'].
                         Serialized to JSON for storage. None for user messages.
     Returns: None
     Side effects: Writes one row to messages.
@@ -452,7 +452,7 @@ async def get_full_metrics_for_session(session_id: str) -> dict:
         model_rows = await cur.fetchall()
         model_usage = {}
         for row in model_rows:
-            # Shorten the model name for display: "groq/qwen/qwen3-32b" → "qwen3-32b"
+            # Shorten the model name for display: "groq/qwen/qwen3.6-27b" → "qwen3.6-27b"
             name = (row["model_used"] or "unknown").split("/")[-1]
             model_usage[name] = model_usage.get(name, 0) + row["cnt"]
 

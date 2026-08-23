@@ -11,10 +11,9 @@ import styles from './Sidebar.module.css';
 const MODEL_OPTIONS = [
   { value: 'auto',                        label: 'Auto Route',         sub: 'Smart multi-agent routing'  },
   { value: 'groq/openai/gpt-oss-120b',    label: 'GPT-OSS 120B',       sub: 'Most powerful · Groq'        },
-  { value: 'groq/qwen/qwen3-32b',         label: 'Qwen3 32B',          sub: 'Strong reasoning · Groq'     },
-  { value: 'groq/llama-3.3-70b-versatile',label: 'Llama 3.3 70B',      sub: 'Balanced · Groq'             },
+  { value: 'groq/qwen/qwen3.6-27b',       label: 'Qwen3.6 27B',        sub: 'Strong reasoning · Groq'     },
+  { value: 'groq/openai/gpt-oss-20b',     label: 'GPT-OSS 20B',        sub: 'Fastest · Groq'              },
   { value: 'gemini/gemini-3.5-flash',     label: 'Gemini 3.5 Flash',   sub: 'Fast · Google'               },
-  { value: 'groq/llama-3.1-8b-instant',   label: 'Llama 3.1 8B',       sub: 'Fastest · Groq'              },
 ];
 
 function PrismIcon() {
