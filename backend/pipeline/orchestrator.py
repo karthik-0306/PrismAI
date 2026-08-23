@@ -158,8 +158,12 @@ class Orchestrator:
         """
 
         # ── Step 1: Resolve or create chat ─────────────────────────────────
-        if chat_id is None:
-            chat_id = generate_id()
+        # A non-null chat_id doesn't guarantee the chat still exists server-side —
+        # e.g. the backend's SQLite data was reset independently of the frontend's
+        # cached chat_id. Re-create it rather than letting save_message's foreign
+        # key insert fail outright.
+        if chat_id is None or not await queries.chat_exists(chat_id):
+            chat_id = chat_id or generate_id()
             title   = self._make_title(message)
             await queries.save_chat(chat_id, session_id, title)
             logger.info("Created new chat %s for session %s", chat_id, session_id)
@@ -226,8 +230,11 @@ class Orchestrator:
         can attach badges (model used, category, savings) at the right moment.
         """
         # ── Step 1: Resolve or create chat + save user message ─────────────────
-        if chat_id is None:
-            chat_id = generate_id()
+        # See run()'s identical check: a non-null chat_id doesn't guarantee the
+        # chat still exists server-side (e.g. SQLite data reset independently
+        # of the frontend's cached chat_id).
+        if chat_id is None or not await queries.chat_exists(chat_id):
+            chat_id = chat_id or generate_id()
             title   = self._make_title(message)
             await queries.save_chat(chat_id, session_id, title)
             logger.info("Stream: Created new chat %s for session %s", chat_id, session_id)
