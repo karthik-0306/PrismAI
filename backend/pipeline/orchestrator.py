@@ -258,7 +258,7 @@ class Orchestrator:
                 model=model_preference,
                 messages=prompt,
                 fallback_models=fallbacks,
-                max_tokens=2048,
+                max_tokens=4096,
             ):
                 if chunk:
                     full_response += chunk
@@ -338,7 +338,7 @@ class Orchestrator:
                 model=primary,
                 messages=prompt,
                 fallback_models=fallbacks,
-                max_tokens=2048,
+                max_tokens=4096,
             ):
                 if chunk:
                     full_response += chunk
@@ -450,7 +450,7 @@ class Orchestrator:
             messages=prompt,
             fallback_models=fallbacks,  # full quality-ordered fallback chain
             temperature=temperature,
-            max_tokens=2048,
+            max_tokens=4096,
         )
 
         # Save assistant response to DB
@@ -674,7 +674,7 @@ class Orchestrator:
             messages=prompt,
             fallback_models=fallbacks,
             temperature=temperature,
-            max_tokens=2048,
+            max_tokens=4096,
         )
 
         logger.info(
@@ -725,7 +725,8 @@ Respond ONLY with a JSON object, no explanation:
                 messages=messages,
                 fallback_models=UTILITY_FALLBACKS,  # full chain — all models as backup
                 temperature=0.0,   # deterministic judgment
-                max_tokens=128,    # judgment response is always short
+                max_tokens=256,    # judgment response is always short
+                low_reasoning=True,  # structured 1-line JSON — deep thinking only starves it
             )
             raw = result.content.strip()
 
@@ -795,7 +796,8 @@ Respond ONLY with the improved sub-task text. No explanation. No JSON."""
                 messages=messages,
                 fallback_models=UTILITY_FALLBACKS,  # full chain — all models as backup
                 temperature=0.3,   # slight creativity needed to produce a better sub-query
-                max_tokens=256,
+                max_tokens=512,
+                low_reasoning=True,  # short rewrite task — deep thinking only starves it
             )
             corrected_sub_query = resplit_result.content.strip()
             logger.info("Resplit produced corrected sub-query: %s", corrected_sub_query[:80])
@@ -864,7 +866,8 @@ Write the final combined answer now:"""
                 messages=messages,
                 fallback_models=UTILITY_FALLBACKS,  # full chain — all models as backup
                 temperature=0.7,   # some creativity for smooth synthesis
-                max_tokens=2048,
+                max_tokens=3072,
+                low_reasoning=True,  # synthesis, not novel reasoning — keep the budget for output
             )
             logger.info("Aggregation complete | %d tokens out", result.completion_tokens)
             return result.content

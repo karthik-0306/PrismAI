@@ -92,7 +92,8 @@ class EvaluatorSubagent:
                 messages=messages,
                 fallback_models=JUDGE_FALLBACKS,
                 temperature=0.7,  # Slight variation between judges is intended
-                max_tokens=256
+                max_tokens=512,
+                low_reasoning=True,  # structured JSON scoring — deep thinking only starves it
             )
             raw = result.content.strip()
             if raw.startswith("```"):

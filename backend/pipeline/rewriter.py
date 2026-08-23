@@ -277,7 +277,8 @@ class QueryRewriter:
                 ],
                 fallback_models=REWRITE_FALLBACKS,
                 temperature=0.3,   # low temperature for consistent, conservative rewrites
-                max_tokens=512,    # rewrites are always shorter than the original
+                max_tokens=768,    # rewrites are always shorter than the original
+                low_reasoning=True,  # compression, not novel reasoning — keep the budget for output
             )
             candidate = result.content.strip()
 

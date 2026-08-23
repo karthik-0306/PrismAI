@@ -174,7 +174,8 @@ class SmartRouter:
                 messages=messages,
                 fallback_models=[UTILITY_FALLBACK],
                 temperature=0.0,    # 0.0 = deterministic, consistent JSON output
-                max_tokens=512,     # classification response is always short
+                max_tokens=768,     # classification response is always short
+                low_reasoning=True, # structured JSON output — deep thinking only starves it
             )
             raw_text = result.content.strip()
             logger.debug("Router raw LLM output: %s", raw_text)

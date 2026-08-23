@@ -102,6 +102,24 @@ MODEL_CONTEXT_WINDOWS: dict[str, int] = {
 # TYPED EXCEPTION
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _reasoning_effort_for(model: str) -> str:
+    """
+    Return the lowest reasoning_effort value each provider actually accepts.
+
+    All three model families used in this app are "thinking" models that spend
+    part of their max_tokens budget on invisible reasoning tokens before writing
+    the visible answer. For short, structured utility calls (classification,
+    judging, aggregation — max_tokens 128-512) that reasoning budget can consume
+    the ENTIRE response, leaving nothing for the actual output. Each provider's
+    minimum valid value differs, so this cannot be a single constant:
+      - Gemini / Qwen3.x: "none" fully disables reasoning.
+      - Groq's GPT-OSS models reason unconditionally — "low" is as low as it goes.
+    """
+    if "gemini" in model or "qwen" in model:
+        return "none"
+    return "low"
+
+
 class LLMError(Exception):
     """
     Raised when all models in a fallback chain have failed.
@@ -156,6 +174,7 @@ class LLMClient:
         temperature: float = 0.7,
         max_tokens: int = 2048,
         response_format: Optional[dict] = None,
+        low_reasoning: bool = False,
     ) -> CompletionResult:
         """
         Call the LLM with automatic fallback on failure.
@@ -170,6 +189,11 @@ class LLMClient:
             temperature:     Sampling temperature (0.0 = deterministic, 1.0 = creative).
             max_tokens:      Maximum tokens in the response.
             response_format: Optional dict specifying format (e.g. {"type": "json_object"}).
+            low_reasoning:   If True, ask the model to minimize invisible "thinking"
+                             tokens (see _reasoning_effort_for). Use this for short,
+                             structured utility calls where max_tokens is small and
+                             deep reasoning would starve the visible output instead
+                             of improving it.
         Returns:
             CompletionResult: typed object with content and token usage.
         Raises:
@@ -196,6 +220,8 @@ class LLMClient:
                 }
                 if response_format:
                     kwargs["response_format"] = response_format
+                if low_reasoning:
+                    kwargs["reasoning_effort"] = _reasoning_effort_for(attempt_model)
 
                 response = await litellm.acompletion(**kwargs)
 
@@ -247,7 +273,7 @@ class LLMClient:
         messages: list,
         fallback_models: Optional[list] = None,
         temperature: float = 0.7,
-        max_tokens: int = 2048,
+        max_tokens: int = 4096,
     ):
         """
         Stream tokens from the LLM, yielding (chunk: str, model_used: str) tuples.
