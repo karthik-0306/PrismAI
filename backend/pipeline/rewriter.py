@@ -10,9 +10,10 @@ can display them.
 How it works:
   1. Call the utility chain with a compact compression prompt.
   2. Count tokens before and after.
-  3. Compute semantic similarity locally (sentence-transformers, see llm/embeddings.py).
+  3. Check that negations, numbers and code blocks survived, then compute semantic
+     similarity (Gemini embeddings by default, see llm/embeddings.py).
   4. Accept the rewrite ONLY if:
-       a) similarity >= SIMILARITY_THRESHOLD (meaning preserved)
+       a) critical tokens are preserved and similarity >= the backend's threshold
        b) the rewrite is actually shorter
   5. Otherwise the original query is used unchanged — the fallback is silent.
 
@@ -25,24 +26,26 @@ Cost guardrails:
 """
 
 import logging
+import re
 from dataclasses import dataclass
 
 from backend import config
 from backend.llm.client import LLMClient
 from backend.llm import embeddings
-from backend.llm.embeddings import get_similarity
 from backend.utils.token_counter import count_tokens
 
 logger = logging.getLogger(__name__)
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-# Minimum cosine similarity for a rewrite to be accepted.
-SIMILARITY_THRESHOLD = 0.80
-
 # Rewrite only where it can pay for itself (see module docstring).
 MIN_TOKENS_TO_REWRITE = 40
 MAX_TOKENS_TO_REWRITE = 600
+
+# A rewrite that keeps less than this fraction of the tokens has almost always
+# dropped a requirement ("…but keep the original order"), even when embedding
+# similarity still looks fine. Faithful rewrites keep roughly 40–60%.
+MIN_KEPT_RATIO = 0.25
 
 # ── Compression system prompt ─────────────────────────────────────────────────
 # Deliberately short: the previous ~2,000-token prompt cost more per query than
@@ -91,11 +94,11 @@ class QueryRewriter:
                          original_tokens, MIN_TOKENS_TO_REWRITE, MAX_TOKENS_TO_REWRITE)
             return self._fallback(message, message, original_tokens, 1.0)
 
-        # The similarity check is what makes a rewrite safe; without the embedding
-        # model loaded, don't make the user wait for it — pass the query through.
+        # The similarity check is what makes a rewrite safe; without an embedding
+        # backend, don't spend tokens on a rewrite we couldn't verify.
         if not embeddings.is_ready():
             embeddings.warm_up_in_background()
-            logger.info("Rewriter: embedding model not ready — skipping rewrite.")
+            logger.info("Rewriter: no embedding backend ready — skipping rewrite.")
             return self._fallback(message, message, original_tokens, 1.0)
 
         # ── Step 1: compress ─────────────────────────────────────────────────
@@ -118,15 +121,29 @@ class QueryRewriter:
             return self._fallback(message, message, original_tokens, 0.0)
 
         rewritten_tokens = count_tokens(candidate)
+        if rewritten_tokens < original_tokens * MIN_KEPT_RATIO:
+            logger.info("Rewriter: over-compressed (%d of %d tokens kept) — discarding.",
+                        rewritten_tokens, original_tokens)
+            return self._fallback(message, candidate, original_tokens, 0.0)
+
         if rewritten_tokens >= original_tokens:
             logger.info("Rewriter: not shorter (%d >= %d) — discarding.", rewritten_tokens, original_tokens)
             return self._fallback(message, candidate, original_tokens, 1.0)
 
-        # ── Step 2: meaning-preservation check ───────────────────────────────
-        similarity = await get_similarity(message, candidate)
-        if similarity < SIMILARITY_THRESHOLD:
-            logger.info("Rewriter: similarity %.3f < %.2f — discarding.", similarity, SIMILARITY_THRESHOLD)
-            return self._fallback(message, candidate, original_tokens, similarity)
+        # ── Step 2: meaning-preservation checks ──────────────────────────────
+        # Embeddings barely notice a dropped "without" (scored 0.96 in calibration),
+        # so negations, numbers and code are checked deterministically first.
+        lost = _lost_critical_tokens(message, candidate)
+        if lost:
+            logger.info("Rewriter: rewrite dropped %s — discarding.", lost)
+            return self._fallback(message, candidate, original_tokens, 0.0)
+
+        similarity = await embeddings.get_similarity(message, candidate)
+        threshold = embeddings.similarity_threshold()
+        if similarity is None or similarity < threshold:
+            logger.info("Rewriter: similarity %s < %.2f — discarding.",
+                        "n/a" if similarity is None else f"{similarity:.3f}", threshold)
+            return self._fallback(message, candidate, original_tokens, similarity or 0.0)
 
         reduction_pct = (1.0 - rewritten_tokens / original_tokens) * 100.0
         logger.info("Rewriter: accepted | %d → %d tokens (%.1f%%) | similarity=%.3f",
@@ -152,3 +169,25 @@ class QueryRewriter:
             similarity_score=similarity,
             fallback_used=True,
         )
+
+
+_NEGATIONS = re.compile(
+    r"\b(not|no|never|none|nor|without|except|unless|excluding|avoid|don't|doesn't|didn't|isn't|aren't|"
+    r"wasn't|can't|cannot|won't|shouldn't|mustn't|neither)\b",
+    re.IGNORECASE,
+)
+_NUMBERS = re.compile(r"\d+(?:[.,]\d+)?")
+_CODE_BLOCKS = re.compile(r"```.*?```", re.DOTALL)
+
+
+def _lost_critical_tokens(original: str, candidate: str) -> list:
+    """Things a faithful compression must never drop."""
+    lost = []
+    if len(_NEGATIONS.findall(candidate)) < len(_NEGATIONS.findall(original)):
+        lost.append("a negation")
+    missing_numbers = set(_NUMBERS.findall(original)) - set(_NUMBERS.findall(candidate))
+    if missing_numbers:
+        lost.append(f"numbers {sorted(missing_numbers)}")
+    if any(block not in candidate for block in _CODE_BLOCKS.findall(original)):
+        lost.append("a code block")
+    return lost

@@ -31,6 +31,10 @@ from dotenv import load_dotenv
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(_PROJECT_ROOT / ".env")
 
+# LiteLLM otherwise downloads its model price map from GitHub at import time,
+# which adds seconds (or a timeout) to every cold start. The bundled copy is fine.
+os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
+
 
 def _env(name: str, default: str) -> str:
     value = os.getenv(name, "").strip()

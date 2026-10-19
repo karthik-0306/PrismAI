@@ -20,7 +20,9 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from backend.database import queries
-from backend.llm.client import LLMClient, health_snapshot
+import litellm
+
+from backend.llm.client import _build_kwargs, _mark_failed, _mark_ok, health_snapshot
 from backend.utils.session import validate_session_id
 
 logger = logging.getLogger(__name__)
@@ -29,7 +31,6 @@ router = APIRouter()
 PING_TTL_S = 300.0
 _last_ping: Dict[str, float] = {}
 _ping_lock = asyncio.Lock()
-_llm = LLMClient()
 
 
 class MetricsResponse(BaseModel):
@@ -55,9 +56,19 @@ async def get_metrics(session_id: str = Query(...)) -> MetricsResponse:
 
 
 async def _ping(model: str) -> None:
+    """
+    Reachability check. Reasoning models may legitimately return no visible text
+    for a tiny budget, so any successful HTTP response counts as healthy (going
+    through LLMClient would treat that empty answer as a failure).
+    """
+    t0 = time.monotonic()
     try:
-        await _llm.complete([model], [{"role": "user", "content": "hi"}], max_tokens=1, temperature=0)
+        await litellm.acompletion(**_build_kwargs(model, [{"role": "user", "content": "Say OK"}],
+                                                  temperature=0, max_tokens=16,
+                                                  low_reasoning=True, json_mode=False))
+        _mark_ok(model, int((time.monotonic() - t0) * 1000))
     except Exception as e:
+        _mark_failed(model, e)
         logger.info("Model ping failed for %s: %s", model, str(e)[:120])
 
 

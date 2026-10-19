@@ -109,7 +109,7 @@ A dedicated preprocessing step compresses verbose user prompts before they reach
 - Strictly preserves code blocks, raw data, and document payloads
 - Measures and logs token savings to the database in real time
 - **Achieved 16.92% average token reduction** across a 100-query evaluation dataset with the v1 prompt (the prompt has since been shortened — re-run `backend/evaluation/test_rewriter_quality.py` to re-measure)
-- Only runs where it can pay for itself (40–600 token queries) and is skipped until the local embedding model has warmed up, so it never adds a cold-start delay
+- Only runs where it can pay for itself (40–600 token queries); rejects rewrites that drop negations, numbers or code, over-compress (<25% kept), or fall below the embedding-similarity threshold
 - Displays a per-message savings chip in the UI showing the reduction percentage
 
 ---
@@ -193,7 +193,7 @@ An interactive built-in dashboard (powered by **Recharts**) showing:
 | **LLM Gateway** | LiteLLM | Universal multi-provider LLM abstraction |
 | **LLM Providers** | Groq, Gemini | Model inference |
 | **Web Search** | Tavily API | AI-optimised real-time search |
-| **Embeddings** | sentence-transformers (local) | Semantic similarity for memory |
+| **Embeddings** | Gemini embedding API (optional local sentence-transformers) | Rewriter meaning-preservation check |
 | **Database** | SQLite + aiosqlite | Async persistent storage |
 | **Token Counter** | tiktoken | Per-message token accounting |
 | **Frontend Host** | Vercel | Static hosting |
@@ -221,7 +221,7 @@ PrismAI/
 │   │   └── evaluator_agent.py      # AI judge panel
 │   ├── llm/
 │   │   ├── client.py               # LiteLLM abstraction (completions + streaming)
-│   │   └── embeddings.py           # Local sentence-transformers wrapper
+│   │   └── embeddings.py           # Gemini (or local) embeddings for the rewriter
 │   ├── database/
 │   │   ├── connection.py           # aiosqlite connection + schema init
 │   │   ├── models.py               # Typed dataclasses (Chat, Message)
@@ -309,7 +309,7 @@ uvicorn backend.main:app --reload --port 8000
 
 > The backend will be available at `http://localhost:8000`
 
-> **Note:** The sentence-transformers embedding model (`all-MiniLM-L6-v2`, ~90 MB) loads in a background thread at startup (downloaded on first run). Until it is ready the rewriter passes queries through unchanged. Set `PRISMAI_EMBEDDINGS=off` on memory-constrained hosts.
+> **Note:** The rewriter verifies each compression with Gemini embeddings (`gemini-embedding-001`), plus deterministic checks that negations, numbers and code blocks survive. For fully offline embeddings, `pip install sentence-transformers` and set `PRISMAI_EMBEDDINGS=local` (needs ~300 MB+ RAM — not suitable for Render's free tier).
 
 ### Run the tests
 
@@ -342,7 +342,7 @@ PrismAI uses a split-stack deployment:
 | **Backend** | Render | [prismai-backend-mruh.onrender.com](https://prismai-backend-mruh.onrender.com) |
 
 **Environment variables required on Render:**
-`GEMINI_API_KEY`, `GROQ_API_KEY`, `TAVILY_API_KEY`, `FRONTEND_URL` (your Vercel URL; comma-separate several to allow CORS). Optional: `PRISMAI_MODEL_*`, `PRISMAI_EMBEDDINGS=off`, `PRISMAI_DB_PATH`, `PRISMAI_CORS_ORIGIN_REGEX`.
+`GEMINI_API_KEY`, `GROQ_API_KEY`, `TAVILY_API_KEY`, `FRONTEND_URL` (your Vercel URL; comma-separate several to allow CORS). Optional: `PRISMAI_MODEL_*`, `PRISMAI_EMBEDDINGS` (`gemini` default / `local` / `off`), `PRISMAI_DB_PATH`, `PRISMAI_CORS_ORIGIN_REGEX`.
 
 > Render's free tier has no persistent disk, so the SQLite database is wiped on every restart or deploy. The app tolerates this (stale chat ids are re-created), but history won't survive restarts there — attach a disk and point `PRISMAI_DB_PATH` at it to keep history.
 

@@ -80,3 +80,40 @@ def test_retry_after_parsing_handles_minutes():
     assert _retry_after_seconds("Please try again in 12m0s") == 720
     assert _retry_after_seconds("Please try again in 2.5s") == 2.5
     assert _retry_after_seconds("no hint") is None
+
+
+def test_rewriter_guard_catches_dropped_negations_numbers_and_code():
+    from backend.pipeline.rewriter import _lost_critical_tokens
+    assert _lost_critical_tokens("sort it without the built-in sort", "sort it using built-in sort") == ["a negation"]
+    assert _lost_critical_tokens("give me 5 examples from 2024", "give me examples") == ["numbers ['2024', '5']"]
+    code = "fix this ```py\nx = 1/0\n``` please"
+    assert "a code block" in _lost_critical_tokens(code, "fix this code")
+    assert _lost_critical_tokens(code, "Fix: ```py\nx = 1/0\n```") == []
+
+
+def test_rewriter_accepts_and_rejects_by_similarity(monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+    from backend.pipeline import rewriter
+
+    long_msg = ("Hey there, could you please write me a Python script that reads a CSV file and then "
+                "plots a really nice looking bar chart using the matplotlib library? I would really appreciate it, "
+                "that would be super helpful for my project, thanks so much in advance!")
+    short = "Write a Python script that reads a CSV file and plots a bar chart with matplotlib."
+
+    async def fake_complete(**kwargs):
+        return SimpleNamespace(content=short, model_used="m")
+    monkeypatch.setattr(rewriter._llm, "complete", fake_complete)
+    monkeypatch.setattr(rewriter.embeddings, "is_ready", lambda: True)
+    monkeypatch.setattr(rewriter.embeddings, "similarity_threshold", lambda: 0.9)
+
+    async def sim(score):
+        async def _s(a, b):
+            return score
+        monkeypatch.setattr(rewriter.embeddings, "get_similarity", _s)
+        return await rewriter.QueryRewriter().rewrite(long_msg)
+
+    ok = asyncio.run(sim(0.95))
+    assert not ok.fallback_used and ok.rewritten_query == short and ok.reduction_pct > 0
+    assert asyncio.run(sim(0.85)).fallback_used
+    assert asyncio.run(sim(None)).fallback_used   # backend unavailable → never trust the rewrite

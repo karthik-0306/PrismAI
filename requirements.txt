@@ -28,11 +28,10 @@ httpx
 # ── Env var loading ──────────────────────────────────
 python-dotenv==1.0.1
 
-# ── Local embeddings (sentence-transformers) ─────────
-# Runs fully locally — no API key, no quota, no network dependency.
-# Downloads model on first run (~90MB for all-MiniLM-L6-v2).
-# numpy is pulled in automatically as a sub-dependency.
-sentence-transformers>=3.0.0
+# ── Embeddings ───────────────────────────────────────
+# The rewriter's similarity check uses the Gemini embedding API (no extra deps).
+# For fully offline embeddings instead: pip install sentence-transformers and set
+# PRISMAI_EMBEDDINGS=local (needs ~300MB+ RAM — too much for Render's free tier).
 
 # ── Data validation — litellm requires >=2.10.0 ──────
 pydantic
