@@ -6,6 +6,7 @@
  * (headings, bold, italic, tables, code blocks with syntax highlighting)
  * and rich metadata badges.
  */
+import { useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
@@ -17,6 +18,7 @@ const CATEGORY_CONFIG = {
   dsa:        { label: 'DSA',        icon: '🔗', color: 'purple'  },
   coding:     { label: 'Coding',     icon: '💻', color: 'cyan'    },
   math:       { label: 'Math',       icon: '📐', color: 'emerald' },
+  reasoning:  { label: 'Reasoning',  icon: '🧠', color: 'violet'  },
   science:    { label: 'Science',    icon: '🔬', color: 'amber'   },
   summarize:  { label: 'Summarize',  icon: '📋', color: 'rose'    },
   evaluate:   { label: 'Evaluate',   icon: '📊', color: 'amber'   },
@@ -38,8 +40,14 @@ function shortModelName(full) {
 }
 
 /* ── Timestamp ──────────────────────────────────────────────────────── */
-function now() {
-  return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+// Server timestamps are UTC "YYYY-MM-DD HH:MM:SS"; live messages have none yet.
+function formatTime(createdAt) {
+  const d = createdAt ? new Date(createdAt.replace(' ', 'T') + (createdAt.endsWith('Z') ? '' : 'Z')) : new Date();
+  return Number.isNaN(d.getTime()) ? '' : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function hostOf(url) {
+  try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return url; }
 }
 
 /* ── Markdown code block renderer ────────────────────── */
@@ -123,20 +131,48 @@ const markdownComponents = {
 };
 
 /* ── User Bubble ─────────────────────────────────────────────────────── */
-function UserBubble({ content }) {
+function UserBubble({ content, created_at }) {
   return (
     <div className={styles.userRow}>
       <div className={styles.userBubble}>
         <p className={styles.content}>{content}</p>
-        <span className={styles.time}>{now()}</span>
+        <span className={styles.time}>{formatTime(created_at)}</span>
       </div>
     </div>
   );
 }
 
 /* ── Assistant Bubble ──────────────────────────────────────── */
-function AssistantBubble({ content, categories_used, models_used, model_used, reduction_pct, isStreaming }) {
+function AssistantBubble({ message, isStreaming, onRegenerate }) {
+  const { content, categories_used, models_used, model_used, reduction_pct,
+          pending, status, error, sources, created_at } = message;
   const isAggregated = model_used === 'aggregated';
+  const [copied, setCopied] = useState(false);
+
+  if (pending && !content) {
+    return <ThinkingBubble label={status || 'Thinking…'} />;
+  }
+
+  if (error && !content) {
+    return (
+      <div className={styles.assistantRow}>
+        <div className={styles.avatar} aria-hidden="true"><span className={styles.avatarGlyph}>✦</span></div>
+        <div className={`${styles.assistantCard} ${styles.errorCard}`} role="alert">
+          <p className={styles.errorText}>{error}</p>
+          {onRegenerate && (
+            <button className={styles.actionBtn} onClick={onRegenerate}>↻ Retry</button>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  function copyAnswer() {
+    navigator.clipboard.writeText(content).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    }).catch(() => {});
+  }
 
   return (
     <div className={styles.assistantRow}>
@@ -157,6 +193,18 @@ function AssistantBubble({ content, categories_used, models_used, model_used, re
           {/* Blinking cursor while streaming */}
           {isStreaming && <span className={styles.streamCursor} aria-hidden="true">▌</span>}
         </div>
+
+        {sources?.length > 0 && (
+          <div className={styles.sourcesRow} aria-label="Sources">
+            {sources.map((src, i) => (
+              <a key={src.url} className={styles.sourceChip} href={src.url} target="_blank" rel="noreferrer" title={src.title}>
+                <span className={styles.sourceNum}>{i + 1}</span>{hostOf(src.url)}
+              </a>
+            ))}
+          </div>
+        )}
+
+        {error && <p className={styles.errorText}>{error}</p>}
 
         {/* Metadata badges row */}
         <div className={styles.metaRow} aria-label="Pipeline metadata">
@@ -203,7 +251,18 @@ function AssistantBubble({ content, categories_used, models_used, model_used, re
           )}
 
 
-          <span className={styles.time}>{now()}</span>
+          {!pending && (
+            <span className={styles.actions}>
+              <button className={styles.actionBtn} onClick={copyAnswer} title="Copy answer">
+                {copied ? '✓ Copied' : 'Copy'}
+              </button>
+              {onRegenerate && (
+                <button className={styles.actionBtn} onClick={onRegenerate} title="Regenerate answer">↻ Regenerate</button>
+              )}
+            </span>
+          )}
+
+          <span className={styles.time}>{formatTime(created_at)}</span>
         </div>
       </div>
     </div>
@@ -211,7 +270,7 @@ function AssistantBubble({ content, categories_used, models_used, model_used, re
 }
 
 /* ── Thinking / Loading Bubble ──────────────────────────────────────── */
-export function ThinkingBubble() {
+export function ThinkingBubble({ label = 'Thinking…' }) {
   return (
     <div className={styles.assistantRow}>
       <div className={styles.avatar}>
@@ -221,25 +280,16 @@ export function ThinkingBubble() {
         <div className={styles.dots}>
           <span /><span /><span />
         </div>
-        <span className={styles.thinkingLabel}>Thinking…</span>
+        <span className={styles.thinkingLabel}>{label}</span>
       </div>
     </div>
   );
 }
 
 /* ── Main Export ────────────────────────────────────────── */
-export default function MessageBubble({ message, isStreaming }) {
+export default function MessageBubble({ message, isStreaming, onRegenerate }) {
   if (message.role === 'user') {
-    return <UserBubble content={message.content} />;
+    return <UserBubble content={message.content} created_at={message.created_at} />;
   }
-  return (
-    <AssistantBubble
-      content={message.content}
-      categories_used={message.categories_used}
-      models_used={message.models_used}
-      model_used={message.model_used}
-      reduction_pct={message.reduction_pct}
-      isStreaming={isStreaming}
-    />
-  );
+  return <AssistantBubble message={message} isStreaming={isStreaming} onRegenerate={onRegenerate} />;
 }

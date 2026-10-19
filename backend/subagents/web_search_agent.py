@@ -3,210 +3,125 @@ backend/subagents/web_search_agent.py
 
 Web Search Subagent — handles queries classified as 'web_search'.
 
-Uses the Tavily Search API (built for AI agents) to fetch high-quality,
-pre-extracted web content without needing any additional package beyond
-httpx (already installed via FastAPI).
+Uses the Tavily Search API (built for AI agents) over plain httpx.
 
 Workflow:
-  1. Call Tavily API async via httpx → get top results (title, URL, content)
-  2. Build a synthesis prompt with the search context
-  3. Stream the LLM synthesis token by token back to the orchestrator
+  1. Search Tavily with the router's self-contained query (so a follow-up like
+     "and in Hyderabad?" searches for the full question, not three words).
+  2. Build a synthesis prompt with numbered sources + recent conversation.
+  3. The orchestrator streams the synthesis; `sources` are returned separately
+     so the frontend can render them as citation chips.
 """
 
 import logging
 import os
-import httpx
-from typing import AsyncGenerator, Tuple
+from datetime import date
+from typing import List, Tuple
 
-from backend.llm.client import LLMClient
+import httpx
+
+from backend import config
+from backend.pipeline.memory import MemoryInjector
 
 logger = logging.getLogger(__name__)
 
-# Tavily API endpoint
 TAVILY_API_URL = "https://api.tavily.com/search"
 
-# Model for synthesizing search results into a clean answer
-WEB_SEARCH_PRIMARY   = "gemini/gemini-3.5-flash"
-WEB_SEARCH_FALLBACKS = [
-    "groq/qwen/qwen3.6-27b",
-    "groq/openai/gpt-oss-120b",
-]
-
 WEB_SEARCH_SYSTEM_PROMPT = """\
-You are a helpful web research assistant with access to real-time search results.
+You are PrismAI's web research assistant. Today's date is {today}.
+You are given fresh web search results for the user's latest question.
 
-Your task:
-1. Read the search results carefully.
-2. Write a well-organized, accurate answer to the user's question.
-3. Cite your sources inline using markdown links, e.g. [Source Name](https://...).
-4. At the end, add a "### Sources" section listing all URLs you referenced.
-
-CRITICAL RULES:
-- Ground your answer in the search results provided. They are real and current.
-- For price queries (gold, stocks, currency), give the exact figures from the results.
-- For local queries (e.g. "gold price in Tenali"), note that local prices track
-  state/national rates closely and provide the rate you found with context.
-- NEVER say you couldn't find results if results are provided — use them.
-- If results are genuinely insufficient, still give your best estimate from training
-  knowledge and clearly label it as an estimate.
-
-Format your response using clean markdown: bold headers, bullet points, tables where helpful.
+- Answer the question directly first, then add supporting detail.
+- Ground every factual claim in the results and cite inline with the source number in
+  square brackets, e.g. "Gold rose 2% today [2]". Only cite numbers that exist.
+- Give exact figures (prices, dates, scores) when the results contain them, and say
+  when the information was published if the results show it.
+- If results conflict, say so. If they are insufficient, say what is missing and give
+  your best general knowledge clearly labelled as possibly outdated.
+- Do not add a separate sources list — the app displays the sources itself.
+- Use clean Markdown (short paragraphs, bullets, tables where useful).
 """
 
+NO_RESULTS_NOTE = (
+    "Web search is unavailable right now (no results were returned). Answer from your "
+    "general knowledge, and clearly tell the user that live information could not be "
+    "retrieved, so figures may be outdated."
+)
 
-async def _fetch_tavily_results(query: str, max_results: int = 5) -> list[dict]:
-    """
-    Async call to Tavily Search API.
-    If the first query returns sparse results (< 2), automatically broadens
-    the query by stripping hyper-local terms (e.g. "in Tenali" → national rate).
-    """
-    api_key = os.getenv("TAVILY_API_KEY", "")
-    if not api_key or api_key == "dummy_tavily_key":
-        logger.error("WebSearch: TAVILY_API_KEY not set. Cannot search.")
+
+async def fetch_tavily_results(query: str, max_results: int = 6) -> List[dict]:
+    """Search Tavily; returns [] on any failure (missing key, HTTP error, timeout)."""
+    api_key = os.getenv("TAVILY_API_KEY", "").strip()
+    if not api_key or api_key.startswith("your_") or api_key == "dummy_tavily_key":
+        logger.error("WebSearch: TAVILY_API_KEY not set.")
         return []
 
-    async def _call_tavily(q: str) -> list[dict]:
+    async def _call(q: str) -> List[dict]:
         payload = {
-            "query": q,
+            "query": q[:400],
             "search_depth": "basic",
             "max_results": max_results,
-            "include_answer": True,
+            "include_answer": False,
             "include_raw_content": False,
         }
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        }
         async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.post(TAVILY_API_URL, json=payload, headers=headers)
+            resp = await client.post(TAVILY_API_URL, json=payload,
+                                     headers={"Authorization": f"Bearer {api_key}"})
             resp.raise_for_status()
-            data = resp.json()
-
-        results = data.get("results", [])
-        tavily_answer = data.get("answer", "")
-        if tavily_answer:
-            results.insert(0, {
-                "title": "Tavily Quick Answer",
-                "url": "https://tavily.com",
-                "content": tavily_answer,
-                "score": 1.0,
-            })
-        return results
+            return resp.json().get("results", []) or []
 
     try:
-        # Strategy 1: Try the original query
-        results = await _call_tavily(query)
-        logger.info("WebSearch: Tavily returned %d results for: %s", len(results), query[:60])
-
-        # Strategy 2: If sparse, broaden by removing hyper-local "in <city>" suffix
+        results = await _call(query)
+        # Hyper-local queries ("gold price in Tenali") are often sparse — broaden once.
         if len(results) < 2 and " in " in query.lower():
-            broad_query = query.lower().split(" in ")[0].strip()
-            # Add "india today" for price/rate queries to keep results relevant
-            price_keywords = {"price", "rate", "cost", "value"}
-            if any(k in broad_query for k in price_keywords):
-                broad_query = f"{broad_query} india today"
-            logger.info("WebSearch: Sparse results — broadening query to: '%s'", broad_query)
-            results = await _call_tavily(broad_query)
-            logger.info("WebSearch: Broadened query returned %d results", len(results))
-
+            broad = query[: query.lower().rfind(" in ")].strip()
+            logger.info("WebSearch: sparse results — broadening to %r", broad)
+            broad_results = await _call(broad)
+            if len(broad_results) > len(results):
+                results = broad_results
+        logger.info("WebSearch: %d results for %r", len(results), query[:60])
         return results
-
     except httpx.HTTPStatusError as e:
-        logger.error("WebSearch: Tavily API error %s: %s", e.response.status_code, e.response.text)
-        return []
+        logger.error("WebSearch: Tavily HTTP %s: %s", e.response.status_code, e.response.text[:200])
     except Exception as e:
         logger.error("WebSearch: Tavily request failed: %s", e)
-        return []
+    return []
 
 
-
-def _build_search_context(results: list[dict]) -> str:
-    """
-    Format Tavily results into a clean, LLM-readable context block.
-    """
-    if not results:
-        return "No search results were returned by the search engine."
-
+def _format_results(results: List[dict]) -> str:
     lines = []
     for i, r in enumerate(results, 1):
-        lines.append(f"[{i}] **{r.get('title', 'Untitled')}**")
-        lines.append(f"    URL: {r.get('url', '')}")
-        lines.append(f"    Content: {r.get('content', '')}")
+        content = " ".join((r.get("content") or "").split())[:1200]
+        published = r.get("published_date")
+        lines.append(f"[{i}] {r.get('title') or 'Untitled'}"
+                     + (f" (published {published})" if published else ""))
+        lines.append(f"URL: {r.get('url', '')}")
+        lines.append(content)
         lines.append("")
-
     return "\n".join(lines)
 
 
 class WebSearchSubagent:
-    """
-    Specialized agent for queries that require real-time web information.
-    Uses Tavily Search API for high-quality, AI-optimized results.
-    """
+    """Searches the web and builds the synthesis prompt; the orchestrator streams it."""
 
-    def __init__(self):
-        self._llm = LLMClient()
+    async def prepare(self, query: str, history: List[dict]) -> Tuple[List[dict], List[dict]]:
+        """Returns (messages_for_llm, sources) where sources = [{title, url}]."""
+        results = await fetch_tavily_results(query)
+        sources = [{"title": r.get("title") or r.get("url", ""), "url": r.get("url", "")}
+                   for r in results if r.get("url")]
 
-    async def solve(self, query: str) -> str:
-        """
-        Full (non-streaming) web search + LLM synthesis.
-        """
-        logger.info("WebSearch Agent: Searching (Tavily) for: %s...", query[:60])
+        if results:
+            user_turn = (f"Question: {query}\n\n<SEARCH_RESULTS retrieved=\"{date.today().isoformat()}\">\n"
+                         f"{_format_results(results)}</SEARCH_RESULTS>")
+            system = WEB_SEARCH_SYSTEM_PROMPT
+        else:
+            user_turn = query
+            system = WEB_SEARCH_SYSTEM_PROMPT + "\n" + NO_RESULTS_NOTE
 
-        results = await _fetch_tavily_results(query)
-        search_context = _build_search_context(results)
+        # Only the last couple of turns — search results already use most of the budget.
+        recent = [m for m in history if m["role"] != "system"][-4:]
+        return MemoryInjector.build_prompt(recent, user_turn, system_prompt=system), sources
 
-        prompt_content = (
-            f"<USER_QUESTION>\n{query}\n</USER_QUESTION>\n\n"
-            f"<SEARCH_RESULTS>\n{search_context}\n</SEARCH_RESULTS>"
-        )
-
-        messages = [
-            {"role": "system", "content": WEB_SEARCH_SYSTEM_PROMPT},
-            {"role": "user",   "content": prompt_content},
-        ]
-
-        try:
-            result = await self._llm.async_complete(
-                model=WEB_SEARCH_PRIMARY,
-                messages=messages,
-                fallback_models=WEB_SEARCH_FALLBACKS,
-                temperature=1.0,   # Gemini requires temperature=1.0
-                max_tokens=4096,
-            )
-            return result.content.strip()
-        except Exception as e:
-            logger.error("WebSearch Agent: LLM synthesis failed: %s", e)
-            raise
-
-    async def stream_solve(self, query: str) -> AsyncGenerator[Tuple[str, str], None]:
-        """
-        Streaming version: fetches Tavily results first (async, non-blocking),
-        then streams the LLM synthesis token by token.
-
-        Yields (chunk: str, model_used: str) tuples — same contract as
-        LLMClient.async_stream() and DSASubagent.stream_solve().
-        """
-        logger.info("WebSearch Agent: Streaming search (Tavily) for: %s...", query[:60])
-
-        # Tavily fetch is now fully async — no thread pool needed
-        results = await _fetch_tavily_results(query)
-        search_context = _build_search_context(results)
-
-        prompt_content = (
-            f"<USER_QUESTION>\n{query}\n</USER_QUESTION>\n\n"
-            f"<SEARCH_RESULTS>\n{search_context}\n</SEARCH_RESULTS>"
-        )
-
-        messages = [
-            {"role": "system", "content": WEB_SEARCH_SYSTEM_PROMPT},
-            {"role": "user",   "content": prompt_content},
-        ]
-
-        async for chunk, model_used in self._llm.async_stream(
-            model=WEB_SEARCH_PRIMARY,
-            messages=messages,
-            fallback_models=WEB_SEARCH_FALLBACKS,
-            temperature=1.0,
-            max_tokens=4096,
-        ):
-            yield chunk, model_used
+    @property
+    def chain(self) -> List[str]:
+        return config.ROUTE_CHAINS["web_search"]

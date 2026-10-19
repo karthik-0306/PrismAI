@@ -10,70 +10,98 @@
 
 const BASE = import.meta.env.VITE_API_BASE_URL ?? '/api';
 
+async function errorFrom(res, fallback) {
+  const body = await res.json().catch(() => null);
+  const detail = body?.detail;
+  if (Array.isArray(detail)) return new Error(detail[0]?.msg || fallback);
+  return new Error(detail || `${fallback} (HTTP ${res.status})`);
+}
+
 /**
  * Stream a chat message via Server-Sent Events.
  *
- * @param {object} params  - Same fields as sendMessage.
- * @param {function} onToken   - Called with each text chunk: onToken(chunk: string)
- * @param {function} onDone    - Called once with the final metadata object
- * @param {function} onFallback - Called when a compound query requires non-streaming fallback
+ * Every query type streams — there is no non-streaming fallback anymore.
+ * Handlers (all optional except onToken):
+ *   onStart({chat_id, user_message_id, is_new_chat})  chat id is known immediately
+ *   onStatus({stage, label})                          progress hint ("Searching the web…")
+ *   onSources(sources)                                [{title, url}] for web answers
+ *   onToken(chunk)
+ *   onReset()                                         discard streamed text; a fallback model restarts
+ *   onDone(metadata)
+ * Rejects with an Error for HTTP errors and pipeline `error` events.
+ * Pass an AbortSignal to support a Stop button (resolves quietly when aborted).
  */
 export async function streamMessage(
-  { session_id, chat_id, message, model_preference, rewriter_enabled },
-  { onToken, onDone, onFallback }
+  { session_id, chat_id, message, model_preference, rewriter_enabled, regenerate },
+  { onStart, onStatus, onSources, onToken, onReset, onDone },
+  signal,
 ) {
-  const res = await fetch(`${BASE}/chat/stream`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      session_id,
-      chat_id: chat_id ?? null,
-      message,
-      model_preference: model_preference ?? 'auto',
-      rewriter_enabled: rewriter_enabled ?? true,
-    }),
-  });
-
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: 'Unknown error' }));
-    throw new Error(err.detail || `HTTP ${res.status}`);
+  let res;
+  try {
+    res = await fetch(`${BASE}/chat/stream`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id,
+        chat_id: chat_id ?? null,
+        message,
+        model_preference: model_preference ?? 'auto',
+        rewriter_enabled: rewriter_enabled ?? true,
+        regenerate: Boolean(regenerate),
+      }),
+      signal,
+    });
+  } catch (err) {
+    if (err.name === 'AbortError') return;
+    throw new Error('Cannot reach the server. Check your connection and try again.', { cause: err });
   }
+
+  if (!res.ok) throw await errorFrom(res, 'Request failed');
 
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
 
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
 
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split('\n');
-    buffer = lines.pop(); // last partial line stays in buffer
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop(); // last partial line stays in the buffer
 
-    for (const line of lines) {
-      if (!line.startsWith('data: ')) continue;
-      const raw = line.slice(6).trim();
-      if (raw === '[DONE]') return;
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const raw = line.slice(6).trim();
+        if (raw === '[DONE]') return;
 
-      let event;
-      try { event = JSON.parse(raw); } catch { continue; }
+        let event;
+        try { event = JSON.parse(raw); } catch { continue; }
 
-      if (event.type === 'token') {
-        onToken(event.content);
-      } else if (event.type === 'metadata') {
-        onDone(event);
-      } else if (event.type === 'fallback') {
-        // Compound query — hand off to non-streaming path
-        await onFallback(event.chat_id);
-      } else if (event.type === 'error') {
-        throw new Error(event.detail || 'Streaming error');
+        switch (event.type) {
+          case 'start':    onStart?.(event); break;
+          case 'status':   onStatus?.(event); break;
+          case 'sources':  onSources?.(event.sources || []); break;
+          case 'token':    onToken(event.content); break;
+          case 'reset':    onReset?.(); break;
+          case 'metadata': onDone?.(event); break;
+          case 'error': {
+            const err = new Error(event.detail || 'Something went wrong.');
+            err.chatId = event.chat_id;
+            throw err;
+          }
+          default: break;
+        }
       }
     }
+  } catch (err) {
+    if (err.name === 'AbortError') return;
+    throw err;
   }
 }
 
-/** Non-streaming fallback — used for compound queries and history loads */
+/** Non-streaming variant (same pipeline). */
 export async function sendMessage({ session_id, chat_id, message, model_preference, rewriter_enabled }) {
   const res = await fetch(`${BASE}/chat`, {
     method: 'POST',
@@ -86,41 +114,51 @@ export async function sendMessage({ session_id, chat_id, message, model_preferen
       rewriter_enabled: rewriter_enabled ?? true,
     }),
   });
-
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: 'Unknown error' }));
-    throw new Error(err.detail || `HTTP ${res.status}`);
-  }
-
+  if (!res.ok) throw await errorFrom(res, 'Request failed');
   return res.json();
 }
 
-/** Fetch all chats for a session (sidebar list) */
+/** Models available for manual selection: [{value, label, sub}] */
+export async function fetchModels() {
+  const res = await fetch(`${BASE}/models`);
+  if (!res.ok) throw await errorFrom(res, 'Failed to fetch models');
+  return (await res.json()).models;
+}
+
+/** Fetch all chats for a session (sidebar list), most recently active first */
 export async function fetchChats(session_id) {
-  const res = await fetch(`${BASE}/chats?session_id=${session_id}`);
-  if (!res.ok) throw new Error(`Failed to fetch chats: HTTP ${res.status}`);
+  const res = await fetch(`${BASE}/chats?session_id=${encodeURIComponent(session_id)}`);
+  if (!res.ok) throw await errorFrom(res, 'Failed to fetch chats');
   return res.json();
 }
 
 export async function searchChats(session_id, q) {
-  const res = await fetch(`${BASE}/chats/search?session_id=${session_id}&q=${encodeURIComponent(q)}`);
-  if (!res.ok) throw new Error('Failed to search chats');
+  const res = await fetch(`${BASE}/chats/search?session_id=${encodeURIComponent(session_id)}&q=${encodeURIComponent(q)}`);
+  if (!res.ok) throw await errorFrom(res, 'Failed to search chats');
   return res.json();
 }
 
-/** Fetch all messages for a specific chat */
-export async function fetchMessages(chat_id) {
-  const res = await fetch(`${BASE}/chats/${chat_id}/messages`);
-  if (!res.ok) throw new Error(`Failed to fetch messages: HTTP ${res.status}`);
+/** Fetch all messages for a chat. Resolves to [] if the chat no longer exists. */
+export async function fetchMessages(session_id, chat_id) {
+  const res = await fetch(`${BASE}/chats/${chat_id}/messages?session_id=${encodeURIComponent(session_id)}`);
+  if (res.status === 404) return [];
+  if (!res.ok) throw await errorFrom(res, 'Failed to fetch messages');
+  return res.json();
+}
+
+export async function renameChat(session_id, chat_id, title) {
+  const res = await fetch(`${BASE}/chats/${chat_id}?session_id=${encodeURIComponent(session_id)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title }),
+  });
+  if (!res.ok) throw await errorFrom(res, 'Failed to rename chat');
   return res.json();
 }
 
 /** Delete a chat and all its messages */
-export async function deleteChat(chat_id) {
-  const res = await fetch(`${BASE}/chats/${chat_id}`, { method: 'DELETE' });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: 'Failed to delete chat' }));
-    throw new Error(err.detail || `HTTP ${res.status}`);
-  }
-  return res.json();
+export async function deleteChat(session_id, chat_id) {
+  const res = await fetch(`${BASE}/chats/${chat_id}?session_id=${encodeURIComponent(session_id)}`, { method: 'DELETE' });
+  if (!res.ok && res.status !== 404) throw await errorFrom(res, 'Failed to delete chat');
+  return true;
 }

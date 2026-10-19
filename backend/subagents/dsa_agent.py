@@ -1,127 +1,53 @@
 """
 backend/subagents/dsa_agent.py
 
-Phase 5: Data Structures & Algorithms Subagent.
-Handles queries routed to the 'dsa' category in auto mode.
+Data Structures & Algorithms Subagent — handles queries routed to 'dsa'.
 
-Workflow:
-1. Grounding (Web Search via Tavily - stubbed with graceful fallback)
-2. Prompt construction with strict 6-section structure enforcement
-3. LLM Generation
+It is history-aware: follow-ups ("what's its complexity?", "now do it iteratively")
+see the earlier turns. The rigid 6-section template is used only for full
+problem-solving requests; quick conceptual questions get a direct answer, the way
+a good tutor (or any daily AI assistant) would respond.
 """
 
 import logging
-from backend.llm.client import LLMClient
+from typing import List
+
+from backend import config
+from backend.pipeline.memory import MemoryInjector
 
 logger = logging.getLogger(__name__)
 
-# Primary model for complex algorithmic reasoning
-DSA_PRIMARY_MODEL = "groq/openai/gpt-oss-120b"
-DSA_FALLBACK_MODELS = [
-    "groq/qwen/qwen3.6-27b",
-    "gemini/gemini-3.5-flash"
-]
-
 DSA_SYSTEM_PROMPT = """\
-You are an elite competitive programmer and computer science professor.
-Your task is to explain and solve the given Data Structures & Algorithms problem.
+You are PrismAI's algorithms specialist — an elite competitive programmer and CS professor. Today's date is {today}.
 
-You MUST format your response using EXACTLY these 6 markdown headers, in order:
+Choose the response shape that fits the request:
 
-### 1. Problem Understanding
-(Briefly restate the problem, inputs, and expected outputs)
+A) Full problem / "solve" / "implement" / LeetCode-style requests → use these sections:
+### Problem Understanding
+### Approach & Intuition
+### Algorithm Steps
+### Code Solution
+(clean, commented code in a fenced block; Python unless the user asked for another language)
+### Complexity Analysis
+(time and space in Big-O, with a one-line justification each)
+### Edge Cases
 
-### 2. Approach & Intuition
-(Explain the logic, data structures used, and why this approach was chosen)
+B) Conceptual questions, comparisons and follow-ups (e.g. "what is its time complexity?",
+"why is it O(log n)?", "difference between BFS and DFS") → answer directly and concisely,
+with a small example, table or snippet only if it helps. Do not force the sections above.
 
-### 3. Algorithm Steps
-(Step-by-step plain English breakdown of the execution)
-
-### 4. Code Solution
-(Production-ready Python code with clear comments and type hints)
-
-### 5. Complexity Analysis
-(Time and Space complexity using Big-O notation, with a short justification)
-
-### 6. Edge Cases
-(What happens on empty input, extreme values, or weird constraints?)
-
-Do NOT add any other top-level headers. Do NOT skip any sections.
-Be concise but rigorous.
+Use the conversation history to resolve what "it", "this", "that approach" refers to.
+Be rigorous and correct; never invent complexity claims.
 """
 
 
 class DSASubagent:
-    """
-    Specialized agent for handling DSA queries.
-    """
-    def __init__(self):
-        self._llm = LLMClient()
+    """Builds the specialist prompt; the orchestrator streams it."""
 
-    async def _ground_with_search(self, query: str) -> str:
-        """
-        Attempt to search the web for recent discussions or similar LeetCode problems.
-        Currently stubs out the Tavily API call with a graceful fallback.
-        """
-        # TODO: Implement real Tavily API call here when key is available
-        logger.debug("DSA Agent: Web search skipped (Tavily key pending)")
-        return ""
+    def build_messages(self, query: str, history: List[dict]) -> List[dict]:
+        logger.info("DSA Agent: %s", query[:60])
+        return MemoryInjector.build_prompt(history, query, system_prompt=DSA_SYSTEM_PROMPT)
 
-    async def solve(self, query: str) -> str:
-        """
-        Process the DSA query and return a structured markdown response.
-        """
-        logger.info("DSA Agent: Solving query: %s...", query[:50])
-
-        search_context = await self._ground_with_search(query)
-
-        prompt_content = f"<USER_QUERY>\n{query}\n</USER_QUERY>"
-        if search_context:
-            prompt_content += f"\n\n<SEARCH_CONTEXT>\n{search_context}\n</SEARCH_CONTEXT>"
-
-        messages = [
-            {"role": "system", "content": DSA_SYSTEM_PROMPT},
-            {"role": "user", "content": prompt_content}
-        ]
-
-        try:
-            result = await self._llm.async_complete(
-                model=DSA_PRIMARY_MODEL,
-                messages=messages,
-                fallback_models=DSA_FALLBACK_MODELS,
-                temperature=0.1,  # Low temp for strict structural adherence
-                max_tokens=4096
-            )
-            return result.content.strip()
-        except Exception as e:
-            logger.error("DSA Agent: LLM failure: %s", e)
-            raise e
-
-    async def stream_solve(self, query: str):
-        """
-        Stream the DSA response token by token.
-        Yields (chunk: str, model_used: str) tuples — same contract as LLMClient.async_stream().
-        The final tuple has an empty chunk string (sentinel for completion).
-        """
-        logger.info("DSA Agent: Streaming query: %s...", query[:50])
-
-        search_context = await self._ground_with_search(query)
-
-        prompt_content = f"<USER_QUERY>\n{query}\n</USER_QUERY>"
-        if search_context:
-            prompt_content += f"\n\n<SEARCH_CONTEXT>\n{search_context}\n</SEARCH_CONTEXT>"
-
-        messages = [
-            {"role": "system", "content": DSA_SYSTEM_PROMPT},
-            {"role": "user", "content": prompt_content}
-        ]
-
-        async for chunk, model_used in self._llm.async_stream(
-            model=DSA_PRIMARY_MODEL,
-            messages=messages,
-            fallback_models=DSA_FALLBACK_MODELS,
-            temperature=0.1,
-            max_tokens=4096,
-        ):
-            yield chunk, model_used
-
+    @property
+    def chain(self) -> List[str]:
+        return config.ROUTE_CHAINS["dsa"]

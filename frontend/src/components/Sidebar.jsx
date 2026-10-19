@@ -3,18 +3,14 @@
  *
  * Left panel: logo, new chat button, list of past conversations.
  */
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { useSession } from '../hooks/useSession';
-import { searchChats } from '../api/chat';
+import { searchChats, fetchModels } from '../api/chat';
 import styles from './Sidebar.module.css';
 
-const MODEL_OPTIONS = [
-  { value: 'auto',                        label: 'Auto Route',         sub: 'Smart multi-agent routing'  },
-  { value: 'groq/openai/gpt-oss-120b',    label: 'GPT-OSS 120B',       sub: 'Most powerful · Groq'        },
-  { value: 'groq/qwen/qwen3.6-27b',         label: 'Qwen3.6 27B',          sub: 'Strong reasoning · Groq'     },
-  { value: 'gemini/gemini-3.5-flash',     label: 'Gemini 3.5 Flash',   sub: 'Fast · Google'               },
-  { value: 'groq/openai/gpt-oss-20b',   label: 'Llama 3.1 8B',       sub: 'Fastest · Groq'              },
-];
+// Manual-mode models come from the backend (GET /api/models) so they can never
+// drift from what the server actually runs.
+const AUTO_OPTION = { value: 'auto', label: 'Auto Route', sub: 'Smart multi-agent routing' };
 
 function PrismIcon() {
   return (
@@ -32,7 +28,10 @@ function PrismIcon() {
 }
 
 function formatDate(dateStr) {
-  const d = new Date(dateStr);
+  if (!dateStr) return '';
+  // Server timestamps are UTC "YYYY-MM-DD HH:MM:SS" without a zone marker.
+  const iso = dateStr.includes('T') ? dateStr : dateStr.replace(' ', 'T') + 'Z';
+  const d = new Date(iso);
   const now = new Date();
   const diffMs = now - d;
   const diffDays = Math.floor(diffMs / 86400000);
@@ -58,6 +57,20 @@ export default function Sidebar({
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState([]);
   const [isSearching, setIsSearching] = useState(false);
+  const [modelOptions, setModelOptions] = useState([AUTO_OPTION]);
+
+  useEffect(() => {
+    fetchModels()
+      .then((models) => setModelOptions([AUTO_OPTION, ...models]))
+      .catch((err) => console.error('Failed to load models:', err));
+  }, []);
+
+  // If the selected model disappears from the server list, fall back to auto.
+  useEffect(() => {
+    if (modelOptions.length > 1 && !modelOptions.some(o => o.value === modelPreference)) {
+      onModelChange('auto');
+    }
+  }, [modelOptions, modelPreference, onModelChange]);
 
   useEffect(() => {
     if (!searchQuery.trim()) {
@@ -127,7 +140,7 @@ export default function Sidebar({
             onChange={(e) => onModelChange(e.target.value)}
             aria-label="Select model"
           >
-            {MODEL_OPTIONS.map((opt) => (
+            {modelOptions.map((opt) => (
               <option key={opt.value} value={opt.value}>
                 {opt.label}
               </option>
@@ -136,7 +149,7 @@ export default function Sidebar({
           <span className={styles.selectArrow}>▾</span>
         </div>
         <p className={styles.modelSub}>
-          {MODEL_OPTIONS.find(o => o.value === modelPreference)?.sub}
+          {modelOptions.find(o => o.value === modelPreference)?.sub}
         </p>
       </div>
 
@@ -196,7 +209,7 @@ export default function Sidebar({
               aria-current={chat.chat_id === activeChatId ? 'page' : undefined}
             >
               <span className={styles.chatTitle}>{chat.title}</span>
-              <span className={styles.chatDate}>{formatDate(chat.created_at)}</span>
+              <span className={styles.chatDate}>{formatDate(chat.updated_at || chat.created_at)}</span>
             </button>
             <button
               className={styles.deleteBtn}

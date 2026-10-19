@@ -1,94 +1,74 @@
 """
 backend/routers/metrics.py
 
-GET /api/metrics?session_id=... — Returns rich analytics data for the dashboard.
-GET /api/model-status          — Returns live health status of each LLM provider.
+GET /api/metrics?session_id=... — analytics data for the dashboard.
+GET /api/model-status           — health of each configured model.
+
+Model status is read from the LLM client's health registry, which is updated by
+every real call the app makes — so it reflects live reality at zero cost.
+Models with no recent traffic are pinged with a 1-token request at most once
+per PING_TTL_S. (The previous version pinged every provider on every poll,
+which itself burned the free-tier rate limits and caused 429s elsewhere.)
 """
 
-import logging
 import asyncio
+import logging
+import time
+from typing import Dict, List
+
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
-from typing import Dict, List, Optional
 
 from backend.database import queries
+from backend.llm.client import LLMClient, health_snapshot
 from backend.utils.session import validate_session_id
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+PING_TTL_S = 300.0
+_last_ping: Dict[str, float] = {}
+_ping_lock = asyncio.Lock()
+_llm = LLMClient()
 
-# ─────────────────────────────────────────────────────────────────────────────
-# RESPONSE MODELS
-# ─────────────────────────────────────────────────────────────────────────────
 
 class MetricsResponse(BaseModel):
-    total_queries:        int
-    total_chats:          int
-    total_tokens:         int
-    tokens_saved:         int
-    avg_reduction_pct:    float
-    category_breakdown:   Dict[str, int]   # {"dsa": 12, "math": 5, ...}
-    model_usage:          Dict[str, int]   # {"gemini-3.5-flash": 10, ...}
-    savings_timeline:     List[Dict]       # [{date, saved}, ...]
+    total_queries:      int
+    total_chats:        int
+    total_tokens:       int
+    tokens_saved:       int
+    avg_reduction_pct:  float
+    category_breakdown: Dict[str, int]
+    model_usage:        Dict[str, int]
+    savings_timeline:   List[Dict]
 
 
 class ModelStatusResponse(BaseModel):
-    models: List[Dict]   # [{name, status, latency_ms}]
+    models: List[Dict]   # [{name, model, status, latency_ms, last_error}]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# METRICS ENDPOINT
-# ─────────────────────────────────────────────────────────────────────────────
-
-@router.get("/metrics", response_model=MetricsResponse,
-            summary="Get analytics metrics for a session")
-async def get_metrics(
-    session_id: str = Query(..., description="UUID4 browser session identifier")
-) -> MetricsResponse:
+@router.get("/metrics", response_model=MetricsResponse, summary="Get analytics metrics for a session")
+async def get_metrics(session_id: str = Query(...)) -> MetricsResponse:
     if not validate_session_id(session_id):
-        raise HTTPException(status_code=400, detail=f"Invalid session_id.")
-
-    logger.info("GET /metrics | session=%s", session_id)
-    data = await queries.get_full_metrics_for_session(session_id)
-    return MetricsResponse(**data)
+        raise HTTPException(status_code=400, detail="Invalid session_id.")
+    return MetricsResponse(**await queries.get_full_metrics_for_session(session_id))
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# MODEL STATUS ENDPOINT
-# ─────────────────────────────────────────────────────────────────────────────
+async def _ping(model: str) -> None:
+    try:
+        await _llm.complete([model], [{"role": "user", "content": "hi"}], max_tokens=1, temperature=0)
+    except Exception as e:
+        logger.info("Model ping failed for %s: %s", model, str(e)[:120])
 
-@router.get("/model-status", response_model=ModelStatusResponse,
-            summary="Get live health status of each LLM provider")
+
+@router.get("/model-status", response_model=ModelStatusResponse, summary="Health of each LLM")
 async def get_model_status() -> ModelStatusResponse:
-    """
-    Pings each provider with a minimal completion and measures latency.
-    Returns green/yellow/red status based on response time or failure.
-    """
-    import time
-    import litellm
-
-    PROVIDERS_TO_CHECK = [
-        ("Groq GPT-OSS-20B",   "groq/openai/gpt-oss-20b"),
-        ("Groq Qwen3.6-27b",       "groq/qwen/qwen3.6-27b"),
-        ("Gemini 3.5 Flash",     "gemini/gemini-3.5-flash"),
-    ]
-
-    async def ping(display_name: str, model: str) -> dict:
-        try:
-            t0 = time.monotonic()
-            await litellm.acompletion(
-                model=model,
-                messages=[{"role": "user", "content": "hi"}],
-                max_tokens=1,
-                temperature=0,
-            )
-            ms = int((time.monotonic() - t0) * 1000)
-            status = "green" if ms < 3000 else "yellow"
-            return {"name": display_name, "model": model, "status": status, "latency_ms": ms}
-        except Exception as e:
-            logger.warning("Model ping failed for %s: %s", model, str(e)[:80])
-            return {"name": display_name, "model": model, "status": "red", "latency_ms": -1}
-
-    results = await asyncio.gather(*[ping(n, m) for n, m in PROVIDERS_TO_CHECK])
-    return ModelStatusResponse(models=list(results))
+    now = time.monotonic()
+    async with _ping_lock:
+        stale = [s["model"] for s in health_snapshot()
+                 if s["status"] == "unknown" and now - _last_ping.get(s["model"], 0) > PING_TTL_S]
+        for m in stale:
+            _last_ping[m] = now
+        if stale:
+            await asyncio.gather(*[_ping(m) for m in stale])
+    return ModelStatusResponse(models=health_snapshot())

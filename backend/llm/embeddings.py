@@ -27,6 +27,8 @@ Usage:
 import asyncio
 import logging
 import math
+import os
+import threading
 from typing import List
 
 logger = logging.getLogger(__name__)
@@ -34,20 +36,53 @@ logger = logging.getLogger(__name__)
 # ── Model identifier ──────────────────────────────────────────────────────────
 _MODEL_NAME = "all-MiniLM-L6-v2"
 
-# ── Lazy model singleton ──────────────────────────────────────────────────────
-# Loaded once on first call, reused forever. Thread-safe (GIL protects assignment).
+# Set PRISMAI_EMBEDDINGS=off on memory-constrained hosts (torch alone is ~300MB+);
+# the rewriter then simply passes queries through unchanged.
+ENABLED = os.getenv("PRISMAI_EMBEDDINGS", "on").strip().lower() not in ("off", "0", "false", "no")
+
+# ── Model singleton ───────────────────────────────────────────────────────────
+# Importing torch + loading the model takes 10–45s on a cold machine. Doing that
+# lazily inside a request froze that user's answer for the whole duration, so the
+# model is warmed in a background thread at startup (warm_up_in_background) and
+# callers check is_ready() instead of waiting.
 _model = None
+_load_lock = threading.Lock()
+_load_failed = False
 
 
 def _get_model():
-    """Return the SentenceTransformer model, loading it on first call."""
-    global _model
+    """Return the SentenceTransformer model, loading it if needed (blocking)."""
+    global _model, _load_failed
     if _model is None:
-        from sentence_transformers import SentenceTransformer
-        logger.info("Loading sentence-transformers model: %s ...", _MODEL_NAME)
-        _model = SentenceTransformer(_MODEL_NAME)
-        logger.info("sentence-transformers model loaded successfully.")
+        with _load_lock:
+            if _model is None:
+                try:
+                    logger.info("Loading sentence-transformers model: %s ...", _MODEL_NAME)
+                    from sentence_transformers import SentenceTransformer
+                    _model = SentenceTransformer(_MODEL_NAME)
+                    logger.info("sentence-transformers model loaded successfully.")
+                except Exception:
+                    _load_failed = True
+                    raise
     return _model
+
+
+def is_ready() -> bool:
+    return _model is not None
+
+
+def warm_up_in_background() -> None:
+    """Start loading the model in a daemon thread; never blocks the caller."""
+    if not ENABLED or _model is not None or _load_failed or _load_lock.locked():
+        return
+
+    def _load():
+        try:
+            _get_model()
+        except Exception as e:
+            logger.warning("Embedding model failed to load (%s) — rewriter will pass queries through.", e)
+
+    threading.Thread(target=_load, name="embedding-warmup", daemon=True).start()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -73,7 +108,7 @@ async def get_similarity(text_a: str, text_b: str) -> float:
         float: cosine similarity score in [0.0, 1.0].
     """
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         # Run synchronous encode() in a thread — avoids blocking the event loop
         similarity = await loop.run_in_executor(
             None,

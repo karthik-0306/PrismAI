@@ -28,13 +28,13 @@ flowchart TD
     U([User]) -->|Raw Query| RW
 
     subgraph PREPROCESSING["Preprocessing Layer"]
-        RW["Query Rewriter\n(Gemini Flash / GPT-OSS 20B)\nStrips filler words\nProtects code blocks\n16.92% avg token reduction"]
+        RW["Query Rewriter\n(Qwen 3.8 27B, utility chain)\nStrips filler words\nProtects code blocks\nSemantic-similarity guard"]
     end
 
     RW -->|Compressed Query| SR
 
     subgraph ROUTING["Smart Router"]
-        SR["SmartRouter\n(Gemini Flash / GPT-OSS 20B)\nClassifies intent\nSplits compound queries"]
+        SR["SmartRouter\n(Qwen 3.8 27B, utility chain)\nClassifies intent with chat context\nResolves follow-ups\nSplits compound queries"]
     end
 
     SR -->|dsa| DSA
@@ -47,7 +47,7 @@ flowchart TD
         DSA["DSA Subagent\nAlgorithm Expert\nComplexity Analysis\nStep-by-Step Solutions"]
         WS["WebSearch Subagent\nTavily API — Real-time Data\nAuto Query Broadening\nSource-Cited Synthesis"]
         EV["Evaluator Subagent\nAI Judge Panel\nFactuality · Relevance\nGroundedness Scoring"]
-        LLM["Orchestrator LLM\nGPT-OSS 120B / Qwen3.6 27B\nGemini Flash / GPT-OSS 20B\n(via LiteLLM)"]
+        LLM["Orchestrator LLM\nGPT-OSS 120B / Qwen 3.8 27B\nGPT-OSS 20B / Gemini Flash\n(via LiteLLM, health-aware fallback)"]
     end
 
     DSA --> JD
@@ -82,19 +82,21 @@ flowchart TD
 
 ### Intelligent Multi-Agent Routing
 
-PrismAI's `SmartRouter` classifies every query into one of 9 categories using a lightweight model, then dispatches it to the most capable agent. Compound queries (e.g. *"explain binary search AND what is quantum computing?"*) are automatically split and processed in parallel, with responses merged by the Aggregator.
+PrismAI's `SmartRouter` classifies every query into one of 9 categories using a lightweight model, then dispatches it to the most capable agent. The router sees a snippet of the conversation, so follow-ups like *"what is its time complexity?"* are rewritten into self-contained tasks and keep the right specialist. Compound queries (e.g. *"explain binary search AND what is quantum computing?"*) are split, answered in parallel, and the merged answer is streamed. Every specialist receives the conversation history.
+
+All model ids live in [`backend/config.py`](backend/config.py) and can be overridden with env vars (`PRISMAI_MODEL_SMART`, `PRISMAI_MODEL_CODER`, `PRISMAI_MODEL_FAST`, `PRISMAI_MODEL_GEMINI`) when a provider renames or retires a model.
 
 | Route | Agent / Handler | Best For |
 |---|---|---|
 | `dsa` | DSA Subagent | Algorithms, LeetCode, complexity analysis |
 | `web_search` | WebSearch Subagent | Real-time info, current events, prices |
 | `evaluate` | Evaluator Subagent | Scoring AI responses, factuality checks |
-| `coding` | Qwen3.6 27B | Debugging, refactoring, code generation |
+| `coding` | Qwen 3.8 27B | Debugging, refactoring, code generation |
 | `math` | GPT-OSS 120B | Proofs, calculus, numerical computation |
 | `reasoning` | GPT-OSS 120B | Logic puzzles, argument analysis |
-| `summarize` | Gemini Flash | Condensing documents and text |
+| `summarize` | Qwen 3.8 27B | Condensing documents and text |
 | `fast` | GPT-OSS 20B | Trivial one-liner answers |
-| `general` | Gemini Flash | Everything else |
+| `general` | Qwen 3.8 27B | Everything else |
 
 ---
 
@@ -106,7 +108,8 @@ A dedicated preprocessing step compresses verbose user prompts before they reach
 - Restructures intent for model clarity
 - Strictly preserves code blocks, raw data, and document payloads
 - Measures and logs token savings to the database in real time
-- **Achieves 16.92% average token reduction** across a 100-query evaluation dataset
+- **Achieved 16.92% average token reduction** across a 100-query evaluation dataset with the v1 prompt (the prompt has since been shortened — re-run `backend/evaluation/test_rewriter_quality.py` to re-measure)
+- Only runs where it can pay for itself (40–600 token queries) and is skipped until the local embedding model has warmed up, so it never adds a cold-start delay
 - Displays a per-message savings chip in the UI showing the reduction percentage
 
 ---
@@ -117,8 +120,9 @@ A fully async subagent powered by the **Tavily Search API**:
 
 - Fetches clean, pre-extracted content — no raw HTML scraping
 - **Automatic query broadening** — if a hyper-local query returns sparse results, it retries with a broader query automatically
-- Tavily's AI-synthesized answer is injected as an additional context source
-- All results are cited with inline source links
+- Follow-ups (*"and what about Google?"*) are searched as complete questions thanks to the context-aware router
+- Answers cite numbered sources inline; the UI renders the sources as clickable chips
+- If search is unavailable, the model answers from general knowledge and says so
 
 ---
 
@@ -128,8 +132,8 @@ A specialized algorithm expert with deep reasoning prompts tuned for:
 
 - Algorithm explanation and correctness proofs
 - Time/space complexity analysis
-- Structured step-by-step LeetCode-style solutions
-- Dedicated model fallback chain for reliability
+- Structured step-by-step LeetCode-style solutions for full problems, direct answers for conceptual follow-ups
+- Conversation-aware: *"now write it in Java"* knows what "it" is
 
 ---
 
@@ -137,16 +141,24 @@ A specialized algorithm expert with deep reasoning prompts tuned for:
 
 A two-tier quality control system:
 
-1. **Evaluator Subagent** — a multi-metric AI judge panel scoring responses on factuality, relevance, and groundedness
-2. **Auto-Retry** — responses scoring Severity 3 (poor quality) trigger an automatic retry with a different model
+1. **Evaluator Subagent** — a panel of three different models scoring a response on seven metrics; *"evaluate your last answer"* scores the previous turn
+2. **Auto-Retry** — in compound queries, sub-answers judged Severity 3 (poor quality) are retried once before aggregation
 
 ---
 
 ### Token-by-Token SSE Streaming
 
-- Real-time streaming via **Server-Sent Events** — tokens appear as they are generated
-- Compound queries gracefully fall back to a non-streaming path with a "Thinking..." indicator
-- Zero-latency token delivery with a persistent connection
+- Real-time streaming via **Server-Sent Events** for every query type, including compound ones
+- Live progress events (*"Searching the web…"*, *"Combining the answers…"*)
+- **Stop** keeps the partial answer; **Regenerate** / **Retry** replace the last turn
+- If a model fails mid-answer, a `reset` event clears the partial text and a fallback model restarts cleanly
+
+### Reliability on Free-Tier APIs
+
+- Per-model health registry: dead keys / retired models are skipped for 10 minutes, rate-limited models until the provider's retry-after
+- Groq counts the *requested* `max_tokens` against its per-minute budget, so on a token rate limit the client shrinks `max_tokens` to what still fits instead of failing
+- When every model is busy, the request waits briefly for the soonest one rather than erroring
+- Utility work (routing, rewriting, titles) runs on a different model than answers to spread load across per-model quotas
 
 ---
 
@@ -164,9 +176,9 @@ An interactive built-in dashboard (powered by **Recharts**) showing:
 ### Chat History and Session Management
 
 - `localStorage`-based UUID session management — no login required, every visitor gets a private isolated session
-- Full conversation history persisted to SQLite
-- Keyword search across all past conversations
-- One-click chat deletion with cascade to all associated messages
+- Every history endpoint is scoped to the caller's session (another session's chat ids return 404)
+- Token-budgeted memory with rolling summaries for long conversations
+- LLM-generated chat titles, rename, keyword search, one-click deletion
 
 ---
 
@@ -196,6 +208,8 @@ PrismAI/
 │
 ├── backend/
 │   ├── main.py                     # FastAPI app, CORS, lifespan
+│   ├── config.py                   # Model ids, chains, limits (env-overridable)
+│   ├── tests/                      # Offline pytest suite (fake LLM, temp DB)
 │   ├── pipeline/
 │   │   ├── orchestrator.py         # Core routing, dispatch, aggregation
 │   │   ├── router.py               # SmartRouter (intent classification)
@@ -213,9 +227,9 @@ PrismAI/
 │   │   ├── models.py               # Typed dataclasses (Chat, Message)
 │   │   └── queries.py              # All SQL — parameterised, async
 │   ├── routers/
-│   │   ├── chat.py                 # POST /api/chat
+│   │   ├── chat.py                 # POST /api/chat, GET /api/models
 │   │   ├── streaming.py            # POST /api/chat/stream (SSE)
-│   │   ├── history.py              # GET/DELETE /api/chats
+│   │   ├── history.py              # GET/PATCH/DELETE /api/chats (session-scoped)
 │   │   └── metrics.py              # GET /api/metrics, GET /api/model-status
 │   ├── utils/
 │   │   ├── session.py              # UUID validation
@@ -295,7 +309,16 @@ uvicorn backend.main:app --reload --port 8000
 
 > The backend will be available at `http://localhost:8000`
 
-> **Note:** On first run, the sentence-transformers embedding model (`all-MiniLM-L6-v2`, ~90 MB) will be downloaded and cached. Subsequent starts load it from disk in ~1 second.
+> **Note:** The sentence-transformers embedding model (`all-MiniLM-L6-v2`, ~90 MB) loads in a background thread at startup (downloaded on first run). Until it is ready the rewriter passes queries through unchanged. Set `PRISMAI_EMBEDDINGS=off` on memory-constrained hosts.
+
+### Run the tests
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest backend/tests -q
+```
+
+The suite runs fully offline against a fake LLM and a temporary database.
 
 ### 4. Start the frontend
 
@@ -319,7 +342,9 @@ PrismAI uses a split-stack deployment:
 | **Backend** | Render | [prismai-backend-mruh.onrender.com](https://prismai-backend-mruh.onrender.com) |
 
 **Environment variables required on Render:**
-`GEMINI_API_KEY`, `GROQ_API_KEY`, `TAVILY_API_KEY`, `FRONTEND_URL` (set to your Vercel URL to allow CORS).
+`GEMINI_API_KEY`, `GROQ_API_KEY`, `TAVILY_API_KEY`, `FRONTEND_URL` (your Vercel URL; comma-separate several to allow CORS). Optional: `PRISMAI_MODEL_*`, `PRISMAI_EMBEDDINGS=off`, `PRISMAI_DB_PATH`, `PRISMAI_CORS_ORIGIN_REGEX`.
+
+> Render's free tier has no persistent disk, so the SQLite database is wiped on every restart or deploy. The app tolerates this (stale chat ids are re-created), but history won't survive restarts there — attach a disk and point `PRISMAI_DB_PATH` at it to keep history.
 
 > The backend runs on Render's free tier, which cold-starts after inactivity. The first request may take 30–60 seconds; the frontend displays a status banner during this period.
 
@@ -332,7 +357,7 @@ PrismAI uses a split-stack deployment:
 | Intent categories | 9 |
 | LLM providers | 2 (Groq, Gemini) |
 | Available models | 4 |
-| Avg token reduction (Query Rewriter) | **16.92%** |
+| Avg token reduction (Query Rewriter, v1 prompt) | **16.92%** |
 | Evaluation dataset | 100 queries |
 | Streaming protocol | Server-Sent Events (SSE) |
 | Database | SQLite (async, session-isolated) |

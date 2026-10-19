@@ -360,3 +360,73 @@
   color: var(--text-secondary);
   font-style: italic;
 }
+
+/* ── Sources, actions, errors ───────────────────────────────────────── */
+.sourcesRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.sourceChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  padding: 3px 10px 3px 4px;
+  border-radius: 20px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-void);
+  color: var(--text-secondary);
+  font-size: 11px;
+  text-decoration: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sourceChip:hover { color: var(--text-primary); border-color: var(--cyan); }
+
+.sourceNum {
+  display: inline-grid;
+  place-items: center;
+  min-width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--border-subtle);
+  font-size: 10px;
+}
+
+.actions {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.actionBtn {
+  padding: 2px 8px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.actionBtn:hover {
+  color: var(--text-primary);
+  border-color: var(--border-subtle);
+}
+
+.errorCard {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border-color: rgba(239, 68, 68, 0.45);
+}
+
+.errorText {
+  margin: 0;
+  color: #fca5a5;
+  font-size: 13px;
+}

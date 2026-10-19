@@ -1,8 +1,12 @@
 /**
  * src/App.jsx
  *
- * Root component. Manages global state: active chat, messages, model preference.
- * Wires Sidebar ↔ ChatArea with clean prop drilling.
+ * Root component. Owns global state (chats, active chat, messages, settings)
+ * and the send / stop / regenerate / retry flows.
+ *
+ * Messages are loaded from the server ONLY when the user selects a chat. The
+ * active chat id also changes when the server creates a chat mid-stream, and
+ * re-fetching then would overwrite the answer that is still streaming in.
  */
 import { useState, useEffect, useCallback, useRef } from 'react';
 import Sidebar from './components/Sidebar';
@@ -11,10 +15,32 @@ import AnalyticsDashboard from './components/AnalyticsDashboard';
 import ServerStatusBanner from './components/ServerStatusBanner';
 import FreeTierNotice from './components/FreeTierNotice';
 import { Toaster, toast } from 'react-hot-toast';
-import { streamMessage, sendMessage, fetchChats, fetchMessages } from './api/chat';
+import { streamMessage, fetchChats, fetchMessages, deleteChat } from './api/chat';
 import { useSession } from './hooks/useSession';
 import { useBackendStatus } from './hooks/useBackendStatus';
 import styles from './App.module.css';
+
+const ACTIVE_CHAT_KEY = 'prismai_active_chat';
+
+function readStoredChat() {
+  try { return localStorage.getItem(ACTIVE_CHAT_KEY); } catch { return null; }
+}
+function storeChat(id) {
+  try {
+    if (id) localStorage.setItem(ACTIVE_CHAT_KEY, id);
+    else localStorage.removeItem(ACTIVE_CHAT_KEY);
+  } catch { /* storage unavailable — not critical */ }
+}
+
+function normaliseMessage(m) {
+  return {
+    ...m,
+    _id: m.message_id,
+    categories_used: m.categories_used ?? [],
+    models_used: m.models_used ?? [],
+    sources: m.sources ?? [],
+  };
+}
 
 export default function App() {
   const sessionId = useSession();
@@ -23,200 +49,200 @@ export default function App() {
   const [chats, setChats] = useState([]);
   const [activeChatId, setActiveChatId] = useState(null);
   const [messages, setMessages] = useState([]);
-  const [isThinking, setIsThinking] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
+  const [isLoadingChat, setIsLoadingChat] = useState(false);
   const [modelPreference, setModelPreference] = useState('auto');
   const [rewriterEnabled, setRewriterEnabled] = useState(true);
-  const [currentView, setCurrentView] = useState('chat'); // 'chat' or 'analytics'
-  const activeChatIdRef = useRef(null);
+  const [currentView, setCurrentView] = useState('chat'); // 'chat' | 'analytics'
 
-  /* ── Load chat list on mount ──────────────────────────────── */
-  useEffect(() => {
-    fetchChats(sessionId)
-      .then(setChats)
-      .catch(console.error);
+  const activeChatIdRef = useRef(null);
+  const abortRef = useRef(null);
+  const isStreamingRef = useRef(false);
+
+  const setActiveChat = useCallback((id) => {
+    activeChatIdRef.current = id;
+    setActiveChatId(id);
+    storeChat(id);
+  }, []);
+
+  const refreshChats = useCallback(() => (
+    fetchChats(sessionId).then(setChats).catch((err) => console.error(err))
+  ), [sessionId]);
+
+  const loadChat = useCallback(async (chatId) => {
+    setIsLoadingChat(true);
+    try {
+      const msgs = await fetchMessages(sessionId, chatId);
+      if (activeChatIdRef.current === chatId) setMessages(msgs.map(normaliseMessage));
+    } catch (err) {
+      console.error(err);
+      toast.error('Could not load this conversation');
+    } finally {
+      setIsLoadingChat(false);
+    }
   }, [sessionId]);
 
-  /* ── Load messages when active chat changes ─────────────────── */
+  /* ── On mount: chat list + restore the last open chat ─────────── */
   useEffect(() => {
-    if (!activeChatId) {
-      setMessages([]);
-      return;
-    }
-    fetchMessages(activeChatId)
-      .then((msgs) => {
-        // Normalise: history messages don't have categories_used / models_used;
-        // we just render them without badges.
-        setMessages(msgs.map(m => ({
-          ...m,
-          _id: m.message_id,
-          categories_used: m.categories_used ?? [],
-          models_used: m.models_used ?? [],
-        })));
+    fetchChats(sessionId)
+      .then((list) => {
+        setChats(list);
+        const stored = readStoredChat();
+        if (stored && list.some(c => c.chat_id === stored)) {
+          setActiveChat(stored);
+          loadChat(stored);
+        }
       })
       .catch(console.error);
-  }, [activeChatId]);
+  }, [sessionId, setActiveChat, loadChat]);
 
-  /* ── Select an existing chat ─────────────────────────────────── */
+  /* ── Navigation ──────────────────────────────────────────────── */
   const handleSelectChat = useCallback((chatId) => {
-    setActiveChatId(chatId);
-    activeChatIdRef.current = chatId;
+    if (isStreamingRef.current) abortRef.current?.abort();
     setCurrentView('chat');
-  }, []);
+    if (chatId === activeChatIdRef.current) return;
+    setActiveChat(chatId);
+    setMessages([]);
+    loadChat(chatId);
+  }, [setActiveChat, loadChat]);
 
-  /* ── Start a fresh chat ──────────────────────────────────────── */
   const handleNewChat = useCallback(() => {
-    setActiveChatId(null);
-    activeChatIdRef.current = null;
+    if (isStreamingRef.current) abortRef.current?.abort();
+    setActiveChat(null);
     setMessages([]);
     setCurrentView('chat');
-  }, []);
+  }, [setActiveChat]);
 
-  /* ── View Analytics ──────────────────────────────────────────── */
-  const handleViewAnalytics = useCallback(() => {
-    setCurrentView('analytics');
-  }, []);
+  const handleViewAnalytics = useCallback(() => setCurrentView('analytics'), []);
 
-  /* ── Send a message ──────────────────────────────────────────── */
-  const handleSend = useCallback(async (text) => {
-    if (!text.trim() || isThinking || isStreaming) return;
+  /* ── Send (also used for regenerate / retry) ─────────────────── */
+  const runTurn = useCallback(async (text, { regenerate = false } = {}) => {
+    if (!text.trim() || isStreamingRef.current) return;
 
-    // Optimistically append user message
-    const tempUserId = `temp-user-${Date.now()}`;
-    const tempAsstId = `temp-asst-${Date.now()}`;
-    const userMsg = { _id: tempUserId, role: 'user', content: text, categories_used: [], models_used: [] };
+    const asstId = `pending-${Date.now()}`;
+    const userMsg = { _id: `user-${Date.now()}`, role: 'user', content: text, categories_used: [], models_used: [] };
+    const placeholder = {
+      _id: asstId, role: 'assistant', content: '', pending: true,
+      status: 'Thinking…', categories_used: [], models_used: [], sources: [],
+    };
 
-    // Placeholder assistant bubble — will be filled token by token
-    const asstPlaceholder = { _id: tempAsstId, role: 'assistant', content: '', categories_used: [], models_used: [] };
+    setMessages(prev => {
+      let base = prev;
+      if (regenerate) {
+        // Drop the trailing assistant reply (or error) and the question it answered.
+        base = [...prev];
+        if (base.length && base[base.length - 1].role === 'assistant') base.pop();
+        if (base.length && base[base.length - 1].role === 'user') base.pop();
+      }
+      return [...base, userMsg, placeholder];
+    });
 
-    setMessages(prev => [...prev, userMsg, asstPlaceholder]);
+    const patch = (fn) => setMessages(prev => prev.map(m => (m._id === asstId ? { ...m, ...fn(m) } : m)));
+
+    const controller = new AbortController();
+    abortRef.current = controller;
+    isStreamingRef.current = true;
     setIsStreaming(true);
-
-    const currentChatId = activeChatIdRef.current;
 
     try {
       await streamMessage(
-        { session_id: sessionId, chat_id: currentChatId, message: text, model_preference: modelPreference, rewriter_enabled: rewriterEnabled },
         {
-          onToken: (chunk) => {
-            setMessages(prev => prev.map(m =>
-              m._id === tempAsstId ? { ...m, content: m.content + chunk } : m
-            ));
-          },
-          onDone: async (meta) => {
-            // Merge final metadata into the assistant bubble
-            setMessages(prev => prev.map(m =>
-              m._id === tempAsstId ? {
-                ...m,
-                _id: meta.message_id,
-                message_id: meta.message_id,
-                model_used: meta.model_used,
-                route_category: meta.route_category,
-                categories_used: meta.categories_used ?? [],
-                models_used: meta.models_used ?? [],
-                original_tokens: meta.original_tokens ?? 0,
-                rewritten_tokens: meta.rewritten_tokens ?? 0,
-                reduction_pct: meta.reduction_pct ?? 0,
-              } : m
-            ));
-
-            // Update active chat id + sidebar for new chats
-            if (!currentChatId && meta.chat_id) {
-              setActiveChatId(meta.chat_id);
-              activeChatIdRef.current = meta.chat_id;
-              const updated = await fetchChats(sessionId).catch(() => chats);
-              setChats(updated);
+          session_id: sessionId,
+          chat_id: activeChatIdRef.current,
+          message: text,
+          model_preference: modelPreference,
+          rewriter_enabled: rewriterEnabled,
+          regenerate,
+        },
+        {
+          onStart: (ev) => {
+            if (ev.chat_id && ev.chat_id !== activeChatIdRef.current) {
+              setActiveChat(ev.chat_id);
+            }
+            if (ev.is_new_chat) {
+              const words = text.trim().split(/\s+/);
+              const title = words.slice(0, 6).join(' ') + (words.length > 6 ? '…' : '');
+              const now = new Date().toISOString();
+              setChats(prev => [{ chat_id: ev.chat_id, title, created_at: now, updated_at: now },
+                ...prev.filter(c => c.chat_id !== ev.chat_id)]);
             }
           },
-          onFallback: async (fallbackChatId) => {
-            // Compound query — remove placeholder, show ThinkingBubble, use non-streaming path
-            setMessages(prev => prev.filter(m => m._id !== tempAsstId));
-            setIsStreaming(false);
-            setIsThinking(true);
-
-            const resolvedChatId = fallbackChatId || currentChatId;
-            try {
-              const data = await sendMessage({
-                session_id: sessionId,
-                chat_id: resolvedChatId,
-                message: text,
-                model_preference: modelPreference,
-                rewriter_enabled: rewriterEnabled,
-              });
-
-              if (!currentChatId && data.chat_id) {
-                setActiveChatId(data.chat_id);
-                activeChatIdRef.current = data.chat_id;
-                const updated = await fetchChats(sessionId).catch(() => chats);
-                setChats(updated);
-              }
-
-              setMessages(prev => [...prev, {
-                _id: data.message_id,
-                message_id: data.message_id,
-                role: 'assistant',
-                content: data.response,
-                model_used: data.model_used,
-                route_category: data.route_category,
-                categories_used: data.categories_used ?? [],
-                models_used: data.models_used ?? [],
-                original_tokens: data.original_tokens ?? 0,
-                rewritten_tokens: data.rewritten_tokens ?? 0,
-                reduction_pct: data.reduction_pct ?? 0,
-              }]);
-            } finally {
-              setIsThinking(false);
-            }
+          onStatus: (ev) => patch(() => ({ status: ev.label })),
+          onSources: (sources) => patch(() => ({ sources })),
+          onToken: (chunk) => patch(m => ({ content: m.content + chunk })),
+          onReset: () => patch(() => ({ content: '' })),
+          onDone: (meta) => {
+            patch(() => ({
+              _id: meta.message_id,
+              message_id: meta.message_id,
+              pending: false,
+              status: null,
+              model_used: meta.model_used,
+              route_category: meta.route_category,
+              categories_used: meta.categories_used ?? [],
+              models_used: meta.models_used ?? [],
+              original_tokens: meta.original_tokens ?? 0,
+              rewritten_tokens: meta.rewritten_tokens ?? 0,
+              reduction_pct: meta.reduction_pct ?? 0,
+              sources: meta.sources ?? [],
+            }));
+            refreshChats();
           },
-        }
+        },
+        controller.signal,
       );
+
+      if (controller.signal.aborted) {
+        patch(m => ({ pending: false, status: null, stopped: true,
+                      content: m.content || '_Response stopped._' }));
+      }
     } catch (err) {
       console.error(err);
-      setMessages(prev => prev.map(m =>
-        m._id === tempAsstId ? { ...m, content: 'Error generating response.' } : m
-      ));
+      patch(() => ({ pending: false, status: null, error: err.message || 'Something went wrong.' }));
       toast.error(err.message || 'Something went wrong');
     } finally {
+      isStreamingRef.current = false;
+      abortRef.current = null;
       setIsStreaming(false);
     }
-  }, [sessionId, activeChatIdRef, modelPreference, rewriterEnabled, isThinking, isStreaming, chats]);
+  }, [sessionId, modelPreference, rewriterEnabled, setActiveChat, refreshChats]);
 
-  /* ── Delete a chat ───────────────────────────────────────────── */
+  const handleSend = useCallback((text) => runTurn(text), [runTurn]);
+
+  const handleStop = useCallback(() => abortRef.current?.abort(), []);
+
+  /* Regenerate the last answer, or retry a failed one — same server operation. */
+  const handleRegenerate = useCallback(() => {
+    const lastUser = [...messages].reverse().find(m => m.role === 'user');
+    if (lastUser) runTurn(lastUser.content, { regenerate: true });
+  }, [messages, runTurn]);
+
+  /* ── Delete ──────────────────────────────────────────────────── */
   const handleDeleteChat = useCallback(async (chatId) => {
     try {
-      // Import here to avoid circular dependencies if any, or use the top-level import
-      const { deleteChat } = await import('./api/chat.js');
-      await deleteChat(chatId);
-      
-      // Update local state
+      await deleteChat(sessionId, chatId);
       setChats(prev => prev.filter(c => c.chat_id !== chatId));
-      
-      // If the deleted chat was currently open, clear the screen
-      if (activeChatIdRef.current === chatId) {
-        handleNewChat();
-      }
-      
+      if (activeChatIdRef.current === chatId) handleNewChat();
       toast.success('Chat deleted');
     } catch (err) {
       console.error('Failed to delete chat:', err);
       toast.error('Failed to delete chat');
     }
-  }, [handleNewChat]);
+  }, [sessionId, handleNewChat]);
 
-  /* ── Derive active chat title ────────────────────────────────── */
   const activeChat = chats.find(c => c.chat_id === activeChatId);
 
   return (
     <div className={styles.layout}>
-      <Toaster 
-        position="top-right" 
+      <Toaster
+        position="top-right"
         toastOptions={{
           style: {
             background: 'var(--bg-card)',
             color: 'var(--text-primary)',
             border: '1px solid var(--border-subtle)',
             fontSize: '14px',
-          }
+          },
         }}
       />
       <Sidebar
@@ -238,9 +264,11 @@ export default function App() {
           <ServerStatusBanner status={backendStatus} />
           <ChatArea
             messages={messages}
-            isThinking={isThinking}
             isStreaming={isStreaming}
+            isLoading={isLoadingChat}
             onSend={handleSend}
+            onStop={handleStop}
+            onRegenerate={handleRegenerate}
             activeChatTitle={activeChat?.title}
           />
         </div>

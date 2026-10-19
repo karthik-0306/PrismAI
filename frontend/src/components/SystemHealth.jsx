@@ -2,6 +2,12 @@ import React, { useState, useEffect } from 'react';
 import { fetchModelStatus } from '../api/metrics';
 import styles from './SystemHealth.module.css';
 
+// The backend reports status from real traffic (no LLM calls per poll), so a
+// relaxed interval is plenty.
+const POLL_INTERVAL_MS = 60 * 1000;
+
+const STATUS_COLOR = { green: 'green', yellow: 'yellow', red: 'red', unknown: 'yellow' };
+
 export default function SystemHealth() {
   const [statuses, setStatuses] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -12,14 +18,13 @@ export default function SystemHealth() {
         const data = await fetchModelStatus();
         setStatuses(data.models);
       } catch (err) {
-        console.error("Failed to load model statuses", err);
+        console.error('Failed to load model statuses', err);
       } finally {
         setLoading(false);
       }
     }
     load();
-    // Poll every 30 seconds
-    const interval = setInterval(load, 30000);
+    const interval = setInterval(load, POLL_INTERVAL_MS);
     return () => clearInterval(interval);
   }, []);
 
@@ -37,8 +42,12 @@ export default function SystemHealth() {
       <span className={styles.label}>System Health:</span>
       <div className={styles.dotsRow}>
         {statuses.map(s => (
-          <div key={s.model} className={styles.dotWrapper} title={`${s.name}: ${s.latency_ms > 0 ? s.latency_ms + 'ms' : 'Offline'}`}>
-            <span className={`${styles.dot} ${styles['dot-' + s.status]}`} />
+          <div
+            key={s.model}
+            className={styles.dotWrapper}
+            title={`${s.name}: ${s.latency_ms > 0 ? `${s.latency_ms}ms` : s.status === 'red' ? 'Unavailable' : 'No recent traffic'}`}
+          >
+            <span className={`${styles.dot} ${styles['dot-' + (STATUS_COLOR[s.status] || 'yellow')]}`} />
           </div>
         ))}
       </div>

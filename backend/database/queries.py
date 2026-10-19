@@ -8,16 +8,52 @@ Rules enforced in this file:
   2. All functions are async — they must be awaited by the caller.
   3. Functions return typed dataclasses (from models.py), not raw aiosqlite.Row objects.
   4. No business logic here — this file only reads/writes the DB.
-     The orchestrator and pipeline modules handle logic.
+  5. Messages are always ordered by (created_at, rowid): created_at has one-second
+     resolution, so a user message and its fast reply often share a timestamp.
 """
 
 import json
 import logging
-from typing import Optional, List
-from backend.database.connection import get_db       # the connection context manager
-from backend.database.models import Chat, Message, Summary  # typed return types
+from typing import List, Optional
+
+from backend.database.connection import get_db
+from backend.database.models import Chat, Message, Summary
 
 logger = logging.getLogger(__name__)
+
+_CHAT_COLUMNS = "chat_id, session_id, title, created_at, updated_at"
+_MESSAGE_COLUMNS = (
+    "message_id, chat_id, role, content, model_used, route_category, token_count, "
+    "is_summarized, created_at, models_used_json, original_tokens, rewritten_tokens, reduction_pct"
+)
+
+
+def _row_to_chat(row) -> Chat:
+    return Chat(
+        chat_id=row["chat_id"],
+        session_id=row["session_id"],
+        title=row["title"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"] or row["created_at"],
+    )
+
+
+def _row_to_message(row) -> Message:
+    return Message(
+        message_id=row["message_id"],
+        chat_id=row["chat_id"],
+        role=row["role"],
+        content=row["content"],
+        model_used=row["model_used"],
+        route_category=row["route_category"],
+        token_count=row["token_count"] or 0,
+        is_summarized=bool(row["is_summarized"]),
+        created_at=row["created_at"],
+        models_used_json=row["models_used_json"],
+        original_tokens=row["original_tokens"] or 0,
+        rewritten_tokens=row["rewritten_tokens"] or 0,
+        reduction_pct=row["reduction_pct"] or 0.0,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -25,95 +61,84 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def save_chat(chat_id: str, session_id: str, title: str) -> None:
-    """
-    Insert a new chat row into the chats table.
-    Called the first time a user sends a message in a new conversation.
-
-    Args:
-        chat_id:    UUID4 string identifying this conversation.
-        session_id: UUID4 string identifying the user's browser session.
-        title:      First 6 words of the first user message, used as sidebar label.
-    Returns: None
-    Side effects: Writes one row to chats.
-    """
     async with get_db() as db:
         await db.execute(
-            "INSERT INTO chats (chat_id, session_id, title) VALUES (?, ?, ?)",
-            (chat_id, session_id, title)  # parameterized — no string formatting
+            "INSERT INTO chats (chat_id, session_id, title, updated_at) VALUES (?, ?, ?, datetime('now'))",
+            (chat_id, session_id, title),
         )
         await db.commit()
     logger.debug("Saved chat %s for session %s", chat_id, session_id)
 
 
-async def get_all_chats_for_session(session_id: str) -> List[Chat]:
-    """
-    Retrieve all chats belonging to a browser session, ordered newest first.
-    Used by GET /chats to populate the sidebar.
-
-    Args:
-        session_id: UUID4 string identifying the user's browser session.
-    Returns:
-        List[Chat]: all chat rows for this session, newest first.
-    """
+async def get_chat(chat_id: str) -> Optional[Chat]:
     async with get_db() as db:
-        cursor = await db.execute(
-            "SELECT chat_id, session_id, title, created_at "
-            "FROM chats WHERE session_id = ? ORDER BY created_at DESC",
-            (session_id,)
-        )
-        rows = await cursor.fetchall()
+        cur = await db.execute(f"SELECT {_CHAT_COLUMNS} FROM chats WHERE chat_id = ?", (chat_id,))
+        row = await cur.fetchone()
+    return _row_to_chat(row) if row else None
 
-    # Convert each raw DB row into a typed Chat dataclass
-    return [
-        Chat(
-            chat_id=row["chat_id"],
-            session_id=row["session_id"],
-            title=row["title"],
-            created_at=row["created_at"],
+
+async def chat_belongs_to(chat_id: str, session_id: str) -> bool:
+    chat = await get_chat(chat_id)
+    return chat is not None and chat.session_id == session_id
+
+
+async def touch_chat(chat_id: str) -> None:
+    """Bump updated_at so the chat moves to the top of the sidebar."""
+    async with get_db() as db:
+        await db.execute("UPDATE chats SET updated_at = datetime('now') WHERE chat_id = ?", (chat_id,))
+        await db.commit()
+
+
+async def rename_chat(chat_id: str, title: str) -> None:
+    async with get_db() as db:
+        await db.execute("UPDATE chats SET title = ? WHERE chat_id = ?", (title, chat_id))
+        await db.commit()
+
+
+async def get_all_chats_for_session(session_id: str) -> List[Chat]:
+    """All chats for a browser session, most recently active first."""
+    async with get_db() as db:
+        cur = await db.execute(
+            f"SELECT {_CHAT_COLUMNS} FROM chats WHERE session_id = ? "
+            "ORDER BY COALESCE(updated_at, created_at) DESC, rowid DESC",
+            (session_id,),
         )
-        for row in rows
-    ]
+        rows = await cur.fetchall()
+    return [_row_to_chat(r) for r in rows]
+
+
+def _escape_like(text: str) -> str:
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 async def search_chats(session_id: str, query: str) -> List[Chat]:
-    """
-    Search past conversations by keyword in the title or message content.
-    Returns matched chats for the session, newest first.
-    """
+    """Chats whose title or any message contains `query` (case-insensitive)."""
+    pattern = f"%{_escape_like(query)}%"
     async with get_db() as db:
-        cursor = await db.execute(
-            """
-            SELECT DISTINCT c.chat_id, c.session_id, c.title, c.created_at
-            FROM chats c
-            LEFT JOIN messages m ON c.chat_id = m.chat_id
-            WHERE c.session_id = ? 
-              AND (c.title LIKE ? OR m.content LIKE ?)
-            ORDER BY c.created_at DESC
+        cur = await db.execute(
+            f"""
+            SELECT {_CHAT_COLUMNS} FROM chats c
+            WHERE c.session_id = ?
+              AND (c.title LIKE ? ESCAPE '\\'
+                   OR EXISTS (SELECT 1 FROM messages m
+                              WHERE m.chat_id = c.chat_id AND m.content LIKE ? ESCAPE '\\'))
+            ORDER BY COALESCE(c.updated_at, c.created_at) DESC, c.rowid DESC
+            LIMIT 50
             """,
-            (session_id, f"%{query}%", f"%{query}%")
+            (session_id, pattern, pattern),
         )
-        rows = await cursor.fetchall()
-
-    return [
-        Chat(
-            chat_id=row["chat_id"],
-            session_id=row["session_id"],
-            title=row["title"],
-            created_at=row["created_at"],
-        )
-        for row in rows
-    ]
+        rows = await cur.fetchall()
+    return [_row_to_chat(r) for r in rows]
 
 
 async def delete_chat(chat_id: str) -> None:
-    """
-    Delete a chat and all its associated messages from the database.
-    """
+    """Delete a chat with all its messages and summaries."""
     async with get_db() as db:
+        await db.execute("DELETE FROM summaries WHERE chat_id = ?", (chat_id,))
         await db.execute("DELETE FROM messages WHERE chat_id = ?", (chat_id,))
         await db.execute("DELETE FROM chats WHERE chat_id = ?", (chat_id,))
         await db.commit()
-    logger.info("Deleted chat %s and all its messages", chat_id)
+    logger.info("Deleted chat %s", chat_id)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -133,30 +158,8 @@ async def save_message(
     rewritten_tokens: int = 0,
     reduction_pct: float = 0.0,
 ) -> None:
-    """
-    Insert a single message (user or assistant turn) into the messages table.
-    Both the user's query and the LLM's reply are stored separately via this function.
-
-    Args:
-        message_id:     UUID4 string for this specific message.
-        chat_id:        UUID4 string — which conversation this belongs to.
-        role:           'user' or 'assistant'.
-        content:        The text of the message.
-        token_count:    Estimated token count (from token_counter.py).
-        model_used:     LiteLLM model string (None for user messages).
-                        For compound responses, set to 'aggregated'.
-        route_category: Router classification result (None for user messages).
-                        For compound responses, stored as CSV e.g. 'dsa,math'.
-        models_used:    Full list of model strings that contributed to this response.
-                        e.g. ['groq/openai/gpt-oss-120b', 'groq/qwen/qwen3.6-27b'].
-                        Serialized to JSON for storage. None for user messages.
-    Returns: None
-    Side effects: Writes one row to messages.
-    """
-    # Serialize the models list to a compact JSON string for storage.
-    # None → stored as NULL in the DB (user messages, pre-migration rows).
-    models_json: Optional[str] = json.dumps(models_used) if models_used else None
-
+    """Insert one message (user or assistant turn)."""
+    models_json = json.dumps(models_used) if models_used else None
     async with get_db() as db:
         await db.execute(
             """
@@ -166,120 +169,53 @@ async def save_message(
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (message_id, chat_id, role, content, model_used, route_category,
-             token_count, models_json, original_tokens, rewritten_tokens, reduction_pct)
+             token_count, models_json, original_tokens, rewritten_tokens, reduction_pct),
         )
+        await db.execute("UPDATE chats SET updated_at = datetime('now') WHERE chat_id = ?", (chat_id,))
         await db.commit()
     logger.debug("Saved %s message %s in chat %s", role, message_id, chat_id)
 
 
 async def get_chat_messages(chat_id: str) -> List[Message]:
-    """
-    Retrieve all messages for a chat, ordered oldest first.
-    Used for two purposes:
-      1. The history router returns this list to the frontend.
-      2. The memory injector uses the last N rows to build the LLM prompt.
-
-    Args:
-        chat_id: UUID4 string identifying the conversation.
-    Returns:
-        List[Message]: all message rows for this chat, oldest first.
-    """
+    """All messages for a chat, oldest first."""
     async with get_db() as db:
-        cursor = await db.execute(
-            """
-            SELECT message_id, chat_id, role, content, model_used,
-                   route_category, token_count, is_summarized, created_at,
-                   models_used_json, original_tokens, rewritten_tokens, reduction_pct
-            FROM messages
-            WHERE chat_id = ?
-            ORDER BY created_at ASC
-            """,
-            (chat_id,)
+        cur = await db.execute(
+            f"SELECT {_MESSAGE_COLUMNS} FROM messages WHERE chat_id = ? ORDER BY created_at ASC, rowid ASC",
+            (chat_id,),
         )
-        rows = await cursor.fetchall()
-
-    return [
-        Message(
-            message_id=row["message_id"],
-            chat_id=row["chat_id"],
-            role=row["role"],
-            content=row["content"],
-            model_used=row["model_used"],
-            route_category=row["route_category"],
-            token_count=row["token_count"],
-            is_summarized=bool(row["is_summarized"]),  # SQLite stores 0/1, convert to bool
-            created_at=row["created_at"],
-            # Deserialize JSON list; fall back to None for legacy rows (column is NULL)
-            models_used_json=row["models_used_json"],
-            original_tokens=row["original_tokens"] if "original_tokens" in row.keys() else 0,
-            rewritten_tokens=row["rewritten_tokens"] if "rewritten_tokens" in row.keys() else 0,
-            reduction_pct=row["reduction_pct"] if "reduction_pct" in row.keys() else 0.0,
-        )
-        for row in rows
-    ]
+        rows = await cur.fetchall()
+    return [_row_to_message(r) for r in rows]
 
 
 async def get_unsummarized_messages(chat_id: str) -> List[Message]:
-    """
-    Return only messages that have NOT yet been rolled into a summary.
-    Used by the memory injector in Phase 4 to decide what to summarise next.
-
-    Args:
-        chat_id: UUID4 string identifying the conversation.
-    Returns:
-        List[Message]: messages with is_summarized = 0, oldest first.
-    """
+    """Messages not yet rolled into a summary, oldest first."""
     async with get_db() as db:
-        cursor = await db.execute(
-            """
-            SELECT message_id, chat_id, role, content, model_used,
-                   route_category, token_count, is_summarized, created_at,
-                   models_used_json
-            FROM messages
-            WHERE chat_id = ? AND is_summarized = 0
-            ORDER BY created_at ASC
-            """,
-            (chat_id,)
+        cur = await db.execute(
+            f"SELECT {_MESSAGE_COLUMNS} FROM messages "
+            "WHERE chat_id = ? AND is_summarized = 0 ORDER BY created_at ASC, rowid ASC",
+            (chat_id,),
         )
-        rows = await cursor.fetchall()
+        rows = await cur.fetchall()
+    return [_row_to_message(r) for r in rows]
 
-    return [
-        Message(
-            message_id=row["message_id"],
-            chat_id=row["chat_id"],
-            role=row["role"],
-            content=row["content"],
-            model_used=row["model_used"],
-            route_category=row["route_category"],
-            token_count=row["token_count"],
-            is_summarized=bool(row["is_summarized"]),
-            created_at=row["created_at"],
-            models_used_json=row["models_used_json"],
-        )
-        for row in rows
-    ]
+
+async def delete_messages(message_ids: List[str]) -> None:
+    if not message_ids:
+        return
+    placeholders = ", ".join("?" for _ in message_ids)
+    async with get_db() as db:
+        await db.execute(f"DELETE FROM messages WHERE message_id IN ({placeholders})", tuple(message_ids))
+        await db.commit()
 
 
 async def mark_messages_summarized(message_ids: List[str]) -> None:
-    """
-    Mark a batch of messages as summarized so they are excluded from
-    future verbatim context injection.
-    Uses a single UPDATE with IN clause — one round-trip regardless of batch size.
-
-    Args:
-        message_ids: List of UUID4 strings to mark as summarized.
-    Returns: None
-    Side effects: Sets is_summarized = 1 on each specified message.
-    """
     if not message_ids:
-        return  # nothing to mark; avoid a no-op SQL call
-
-    # Build parameterized placeholders: (?, ?, ?) for however many IDs
+        return
     placeholders = ", ".join("?" for _ in message_ids)
     async with get_db() as db:
         await db.execute(
             f"UPDATE messages SET is_summarized = 1 WHERE message_id IN ({placeholders})",
-            tuple(message_ids)
+            tuple(message_ids),
         )
         await db.commit()
     logger.debug("Marked %d messages as summarized", len(message_ids))
@@ -289,62 +225,26 @@ async def mark_messages_summarized(message_ids: List[str]) -> None:
 # SUMMARY QUERIES
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def save_summary(
-    summary_id: str,
-    chat_id: str,
-    content: str,
-    covers_up_to: str,
-) -> None:
-    """
-    Persist a newly generated summary to the summaries table.
-    Called by the memory injector after it compresses old messages.
-
-    Args:
-        summary_id:   UUID4 string for this summary row.
-        chat_id:      UUID4 string — which conversation this covers.
-        content:      The LLM-generated summary text.
-        covers_up_to: message_id of the last message included in this summary.
-    Returns: None
-    Side effects: Writes one row to summaries.
-    """
+async def save_summary(summary_id: str, chat_id: str, content: str, covers_up_to: str) -> None:
     async with get_db() as db:
         await db.execute(
-            """
-            INSERT INTO summaries (summary_id, chat_id, content, covers_up_to)
-            VALUES (?, ?, ?, ?)
-            """,
-            (summary_id, chat_id, content, covers_up_to)
+            "INSERT INTO summaries (summary_id, chat_id, content, covers_up_to) VALUES (?, ?, ?, ?)",
+            (summary_id, chat_id, content, covers_up_to),
         )
         await db.commit()
     logger.debug("Saved summary %s for chat %s", summary_id, chat_id)
 
 
 async def get_latest_summary(chat_id: str) -> Optional[Summary]:
-    """
-    Return the most recent summary for a chat, or None if none exist.
-    The memory injector uses this to prepend compressed history to the prompt.
-
-    Args:
-        chat_id: UUID4 string identifying the conversation.
-    Returns:
-        Optional[Summary]: the newest summary row, or None.
-    """
     async with get_db() as db:
-        cursor = await db.execute(
-            """
-            SELECT summary_id, chat_id, content, covers_up_to, created_at
-            FROM summaries
-            WHERE chat_id = ?
-            ORDER BY created_at DESC
-            LIMIT 1
-            """,
-            (chat_id,)
+        cur = await db.execute(
+            "SELECT summary_id, chat_id, content, covers_up_to, created_at FROM summaries "
+            "WHERE chat_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            (chat_id,),
         )
-        row = await cursor.fetchone()  # fetchone returns None if no rows
-
+        row = await cur.fetchone()
     if row is None:
         return None
-
     return Summary(
         summary_id=row["summary_id"],
         chat_id=row["chat_id"],
@@ -358,29 +258,12 @@ async def get_latest_summary(chat_id: str) -> Optional[Summary]:
 # METRICS QUERIES
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def get_token_stats_for_session(session_id: str) -> dict:
-    """Legacy stats query — kept for backwards compatibility."""
-    async with get_db() as db:
-        cursor = await db.execute(
-            """
-            SELECT COUNT(*) as total_messages, COALESCE(SUM(m.token_count), 0) as total_tokens
-            FROM messages m
-            JOIN chats c ON m.chat_id = c.chat_id
-            WHERE c.session_id = ?
-            """,
-            (session_id,)
-        )
-        row = await cursor.fetchone()
-
-    total_messages = row["total_messages"] if row else 0
-    total_tokens = row["total_tokens"] if row else 0
-    avg = total_tokens // total_messages if total_messages > 0 else 0
-
-    return {
-        "total_messages": total_messages,
-        "total_tokens": total_tokens,
-        "avg_tokens_per_message": avg,
-    }
+def _display_model_name(raw: str) -> str:
+    # Legacy rows stored subagent answers as "subagent/dsa (groq/qwen/qwen3.6-27b)" —
+    # unwrap to the real model before shortening.
+    if "(" in raw and raw.endswith(")"):
+        raw = raw[raw.find("(") + 1:-1]
+    return raw.split("/")[-1]
 
 
 async def get_full_metrics_for_session(session_id: str) -> dict:
@@ -393,97 +276,83 @@ async def get_full_metrics_for_session(session_id: str) -> dict:
       - savings_timeline: [{date: "YYYY-MM-DD", saved: N}] per day
     """
     async with get_db() as db:
-        # ── Total chat count ──────────────────────────────────────────────────
-        cur = await db.execute(
-            "SELECT COUNT(*) as n FROM chats WHERE session_id = ?", (session_id,)
-        )
+        cur = await db.execute("SELECT COUNT(*) AS n FROM chats WHERE session_id = ?", (session_id,))
         total_chats = (await cur.fetchone())["n"]
 
-        # ── Assistant messages aggregate ──────────────────────────────────────
         cur = await db.execute(
             """
             SELECT
-                COUNT(*) as total_queries,
-                COALESCE(SUM(m.token_count), 0) as total_tokens,
-                COALESCE(SUM(m.original_tokens - m.rewritten_tokens), 0) as tokens_saved,
-                COALESCE(AVG(CASE WHEN m.reduction_pct > 0 THEN m.reduction_pct ELSE NULL END), 0) as avg_reduction_pct
-            FROM messages m
-            JOIN chats c ON m.chat_id = c.chat_id
+                COUNT(*) AS total_queries,
+                COALESCE(SUM(m.token_count), 0) AS total_tokens,
+                COALESCE(SUM(MAX(m.original_tokens - m.rewritten_tokens, 0)), 0) AS tokens_saved,
+                COALESCE(AVG(CASE WHEN m.reduction_pct > 0 THEN m.reduction_pct END), 0) AS avg_reduction_pct
+            FROM messages m JOIN chats c ON m.chat_id = c.chat_id
             WHERE c.session_id = ? AND m.role = 'assistant'
             """,
-            (session_id,)
+            (session_id,),
         )
         agg = await cur.fetchone()
 
-        # ── Category breakdown ────────────────────────────────────────────────
         cur = await db.execute(
             """
-            SELECT route_category, COUNT(*) as cnt
-            FROM messages m
-            JOIN chats c ON m.chat_id = c.chat_id
+            SELECT route_category, COUNT(*) AS cnt
+            FROM messages m JOIN chats c ON m.chat_id = c.chat_id
             WHERE c.session_id = ? AND m.role = 'assistant' AND m.route_category IS NOT NULL
             GROUP BY route_category
-            ORDER BY cnt DESC
             """,
-            (session_id,)
+            (session_id,),
         )
-        cat_rows = await cur.fetchall()
-        category_breakdown = {}
-        for row in cat_rows:
-            # compound categories stored as CSV e.g. "dsa,math" — split and count each
+        category_breakdown: dict = {}
+        for row in await cur.fetchall():
             for cat in (row["route_category"] or "").split(","):
                 cat = cat.strip()
                 if cat:
                     category_breakdown[cat] = category_breakdown.get(cat, 0) + row["cnt"]
 
-        # ── Model usage ───────────────────────────────────────────────────────
         cur = await db.execute(
             """
-            SELECT model_used, COUNT(*) as cnt
-            FROM messages m
-            JOIN chats c ON m.chat_id = c.chat_id
-            WHERE c.session_id = ? AND m.role = 'assistant' AND m.model_used IS NOT NULL
-            GROUP BY model_used
-            ORDER BY cnt DESC
-            LIMIT 10
+            SELECT m.model_used, m.models_used_json
+            FROM messages m JOIN chats c ON m.chat_id = c.chat_id
+            WHERE c.session_id = ? AND m.role = 'assistant'
             """,
-            (session_id,)
+            (session_id,),
         )
-        model_rows = await cur.fetchall()
-        model_usage = {}
-        for row in model_rows:
-            # Shorten the model name for display: "groq/qwen/qwen3.6-27b" → "qwen3-32b"
-            name = (row["model_used"] or "unknown").split("/")[-1]
-            model_usage[name] = model_usage.get(name, 0) + row["cnt"]
+        model_usage: dict = {}
+        for row in await cur.fetchall():
+            models = []
+            if row["models_used_json"]:
+                try:
+                    models = [m for m in json.loads(row["models_used_json"]) if m]
+                except (ValueError, TypeError):
+                    models = []
+            if not models and row["model_used"] and row["model_used"] != "aggregated":
+                models = [row["model_used"]]
+            for m in models:
+                name = _display_model_name(m)
+                model_usage[name] = model_usage.get(name, 0) + 1
 
-        # ── Daily savings timeline ────────────────────────────────────────────
         cur = await db.execute(
             """
-            SELECT
-                DATE(m.created_at) as day,
-                COALESCE(SUM(m.original_tokens - m.rewritten_tokens), 0) as saved
-            FROM messages m
-            JOIN chats c ON m.chat_id = c.chat_id
+            SELECT DATE(m.created_at) AS day,
+                   COALESCE(SUM(MAX(m.original_tokens - m.rewritten_tokens, 0)), 0) AS saved
+            FROM messages m JOIN chats c ON m.chat_id = c.chat_id
             WHERE c.session_id = ? AND m.role = 'assistant'
             GROUP BY DATE(m.created_at)
-            ORDER BY day ASC
+            ORDER BY day DESC
             LIMIT 30
             """,
-            (session_id,)
+            (session_id,),
         )
-        timeline_rows = await cur.fetchall()
-        savings_timeline = [
-            {"date": row["day"], "saved": max(0, row["saved"])}
-            for row in timeline_rows
-        ]
+        savings_timeline = [{"date": r["day"], "saved": r["saved"]} for r in await cur.fetchall()]
+        savings_timeline.reverse()
 
     return {
         "total_queries":      agg["total_queries"] if agg else 0,
         "total_chats":        total_chats,
         "total_tokens":       agg["total_tokens"] if agg else 0,
-        "tokens_saved":       max(0, agg["tokens_saved"]) if agg else 0,
-        "avg_reduction_pct":  round(agg["avg_reduction_pct"] or 0.0, 1),
-        "category_breakdown": category_breakdown,
-        "model_usage":        model_usage,
+        "tokens_saved":       agg["tokens_saved"] if agg else 0,
+        "avg_reduction_pct":  round(agg["avg_reduction_pct"] or 0.0, 1) if agg else 0.0,
+        "category_breakdown": dict(sorted(category_breakdown.items(), key=lambda kv: -kv[1])),
+        "model_usage":        dict(sorted(model_usage.items(), key=lambda kv: -kv[1])[:10]),
         "savings_timeline":   savings_timeline,
     }

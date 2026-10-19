@@ -3,28 +3,25 @@ backend/routers/streaming.py
 
 POST /api/chat/stream — Server-Sent Events (SSE) streaming endpoint.
 
-Emits a stream of newline-delimited SSE events:
-  data: {"type": "token",    "content": "Hello "}
-  data: {"type": "token",    "content": "world!"}
-  data: {"type": "metadata", "chat_id": "...", "categories_used": [...], ...}
-  data: [DONE]
+Each event is one line:  data: <json>\\n\\n   and the stream ends with  data: [DONE]
+See backend/pipeline/orchestrator.py for the event types. Every query type —
+including compound, multi-part queries — streams through this endpoint.
 
-Special event:
-  data: {"type": "fallback", "chat_id": "..."} — compound query, frontend
-        should immediately call POST /api/chat for the non-streaming response.
-
-The frontend reads this stream using the Fetch API with a ReadableStream reader.
+If the client disconnects (e.g. the user presses "Stop"), Starlette cancels the
+generator and the orchestrator saves the partial answer.
 """
 
 import json
 import logging
+from typing import Optional
+
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from typing import Optional
 
+from backend import config
 from backend.pipeline.orchestrator import Orchestrator
-from backend.utils.session import validate_session_id
+from backend.utils.session import validate_chat_id, validate_session_id
 
 logger = logging.getLogger(__name__)
 
@@ -32,68 +29,64 @@ router = APIRouter()
 _orchestrator = Orchestrator()
 
 
-class StreamRequest(BaseModel):
-    """Same fields as ChatRequest — kept in sync."""
-    session_id:        str  = Field(..., description="UUID4 browser session identifier")
-    message:           str  = Field(..., min_length=1)
-    chat_id:           Optional[str]  = Field(None)
-    model_preference:  str  = Field("auto")
-    rewriter_enabled:  bool = Field(True)
+class ChatRequest(BaseModel):
+    """Shared by POST /chat and POST /chat/stream."""
+    session_id:       str           = Field(..., description="UUID4 browser session identifier")
+    message:          str           = Field(..., min_length=1, max_length=config.MAX_MESSAGE_CHARS)
+    chat_id:          Optional[str] = Field(None, description="Existing chat UUID, or null for a new chat")
+    model_preference: str           = Field("auto", description="'auto' or a model id from GET /api/models")
+    rewriter_enabled: bool          = Field(True)
+    regenerate:       bool          = Field(False, description="Replace the chat's last turn instead of appending")
 
 
-@router.post(
-    "/chat/stream",
-    summary="Send a message and stream back the LLM response via SSE",
-    response_class=StreamingResponse,
-)
-async def stream_chat(request: StreamRequest):
-    """
-    SSE streaming endpoint.
-
-    Returns a text/event-stream response where each line is:
-      data: <json>\n\n
-
-    The client should use fetch() + ReadableStream to consume this.
-    """
-    # ── Validate ──────────────────────────────────────────────────────────────
+def validate_chat_request(request: ChatRequest) -> dict:
+    """Validate and normalise a request into orchestrator kwargs (raises 400)."""
     if not validate_session_id(request.session_id):
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid session_id: '{request.session_id}'."
-        )
+        raise HTTPException(status_code=400, detail="Invalid session_id. Must be a UUID4 string.")
+    if request.chat_id is not None and not validate_chat_id(request.chat_id):
+        raise HTTPException(status_code=400, detail="Invalid chat_id. Must be a UUID4 string.")
     if not request.message.strip():
         raise HTTPException(status_code=400, detail="Message cannot be empty.")
 
-    logger.info(
-        "POST /chat/stream | session=%s | chat=%s | model_pref=%s | msg_len=%d",
-        request.session_id, request.chat_id, request.model_preference, len(request.message)
-    )
+    model = request.model_preference or "auto"
+    if model != "auto" and model not in config.ALL_MODELS:
+        # Stale value from an old frontend, or an attempt to call an arbitrary model.
+        logger.warning("Unknown model_preference %r — using auto routing", model)
+        model = "auto"
+
+    return {
+        "session_id": request.session_id,
+        "chat_id": request.chat_id,
+        "message": request.message,
+        "model_preference": model,
+        "rewriter_enabled": request.rewriter_enabled,
+        "regenerate": request.regenerate,
+    }
+
+
+@router.post("/chat/stream", summary="Send a message and stream the response via SSE",
+             response_class=StreamingResponse)
+async def stream_chat(request: ChatRequest):
+    kwargs = validate_chat_request(request)
+    logger.info("POST /chat/stream | session=%s | chat=%s | model=%s | len=%d | regen=%s",
+                request.session_id, request.chat_id, kwargs["model_preference"],
+                len(request.message), request.regenerate)
 
     async def event_generator():
         try:
-            async for event in _orchestrator.stream(
-                session_id=request.session_id,
-                chat_id=request.chat_id,
-                message=request.message,
-                model_preference=request.model_preference,
-                rewriter_enabled=request.rewriter_enabled,
-            ):
-                yield f"data: {json.dumps(event)}\n\n"
-
-            # SSE terminator
-            yield "data: [DONE]\n\n"
-
-        except Exception as e:
-            logger.error("Streaming pipeline error: %s", e, exc_info=True)
-            error_event = {"type": "error", "detail": str(e)}
-            yield f"data: {json.dumps(error_event)}\n\n"
-            yield "data: [DONE]\n\n"
+            async for event in _orchestrator.stream(**kwargs):
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        except Exception:
+            logger.exception("Streaming pipeline crashed")
+            yield f"data: {json.dumps({'type': 'error', 'detail': 'Internal error. Please try again.'})}\n\n"
+        yield "data: [DONE]\n\n"
 
     return StreamingResponse(
         event_generator(),
         media_type="text/event-stream",
         headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",   # disable nginx buffering if deployed
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",   # disable proxy buffering (nginx / Render)
+            "Connection": "keep-alive",
         },
     )

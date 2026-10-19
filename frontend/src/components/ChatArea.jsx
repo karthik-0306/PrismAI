@@ -4,7 +4,7 @@
  * The main chat window: header, scrollable message list, input bar.
  */
 import { useRef, useEffect } from 'react';
-import MessageBubble, { ThinkingBubble } from './MessageBubble';
+import MessageBubble from './MessageBubble';
 import styles from './ChatArea.module.css';
 
 function SendIcon() {
@@ -12,6 +12,14 @@ function SendIcon() {
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <line x1="22" y1="2" x2="11" y2="13"/>
       <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+    </svg>
+  );
+}
+
+function StopIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <rect x="6" y="6" width="12" height="12" rx="2" />
     </svg>
   );
 }
@@ -45,7 +53,7 @@ function EmptyState() {
   );
 }
 
-export default function ChatArea({ messages, isThinking, isStreaming, onSend, activeChatTitle }) {
+export default function ChatArea({ messages, isStreaming, isLoading, onSend, onStop, onRegenerate, activeChatTitle }) {
   const listRef = useRef(null);
   const inputRef = useRef(null);
 
@@ -54,7 +62,7 @@ export default function ChatArea({ messages, isThinking, isStreaming, onSend, ac
     if (listRef.current) {
       listRef.current.scrollTo({ top: listRef.current.scrollHeight, behavior: 'smooth' });
     }
-  }, [messages, isThinking]);
+  }, [messages]);
 
   function handleKeyDown(e) {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -71,8 +79,9 @@ export default function ChatArea({ messages, isThinking, isStreaming, onSend, ac
 
   function submit() {
     const text = inputRef.current?.value?.trim();
-    if (!text || isThinking) return;
+    if (!text || isStreaming) return;
     inputRef.current.value = '';
+    inputRef.current.style.height = 'auto';
     onSend(text);
   }
 
@@ -123,20 +132,20 @@ export default function ChatArea({ messages, isThinking, isStreaming, onSend, ac
       {/* Messages */}
       <div className={styles.messageList} ref={listRef} role="log" aria-live="polite" aria-label="Conversation">
         {messages.length === 0 ? (
-          <EmptyState />
+          isLoading ? null : <EmptyState />
         ) : (
           messages.map((msg, idx) => {
-            const isLastAsst = msg.role === 'assistant' && idx === messages.length - 1;
+            const isLast = idx === messages.length - 1;
             return (
               <MessageBubble
-                key={msg.message_id || msg._id}
+                key={msg._id || msg.message_id}
                 message={msg}
-                isStreaming={isStreaming && isLastAsst}
+                isStreaming={isStreaming && isLast && msg.role === 'assistant'}
+                onRegenerate={isLast && msg.role === 'assistant' && !isStreaming ? onRegenerate : undefined}
               />
             );
           })
         )}
-        {isThinking && <ThinkingBubble />}
       </div>
 
       {/* Input bar */}
@@ -158,21 +167,27 @@ export default function ChatArea({ messages, isThinking, isStreaming, onSend, ac
               });
             }}
             aria-label="Message input"
-            disabled={isThinking || isStreaming}
           />
-          <button
-            id="btn-send"
-            className={styles.sendBtn}
-            onClick={submit}
-            disabled={isThinking || isStreaming}
-            aria-label="Send message"
-          >
-            {isThinking ? (
-              <span className={styles.sendSpinner} aria-hidden="true" />
-            ) : (
+          {isStreaming ? (
+            <button
+              id="btn-stop"
+              className={styles.sendBtn}
+              onClick={onStop}
+              aria-label="Stop generating"
+              title="Stop generating"
+            >
+              <StopIcon />
+            </button>
+          ) : (
+            <button
+              id="btn-send"
+              className={styles.sendBtn}
+              onClick={submit}
+              aria-label="Send message"
+            >
               <SendIcon />
-            )}
-          </button>
+            </button>
+          )}
         </div>
         <p className={styles.inputHint}>
           <kbd>Enter</kbd> to send · <kbd>Shift+Enter</kbd> for new line
