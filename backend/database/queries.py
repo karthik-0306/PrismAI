@@ -16,6 +16,7 @@ import json
 import logging
 from typing import List, Optional
 
+from backend import config
 from backend.database.connection import get_db
 from backend.database.models import Chat, Message, Summary
 
@@ -263,7 +264,8 @@ def _display_model_name(raw: str) -> str:
     # unwrap to the real model before shortening.
     if "(" in raw and raw.endswith(")"):
         raw = raw[raw.find("(") + 1:-1]
-    return raw.split("/")[-1]
+    # Same names as the model picker and health panel; retired models keep their id.
+    return config.MODEL_LABELS.get(raw) or raw.split("/")[-1]
 
 
 async def get_full_metrics_for_session(session_id: str) -> dict:

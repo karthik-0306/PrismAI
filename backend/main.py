@@ -46,8 +46,9 @@ async def lifespan(app: FastAPI):
     missing = [k for k in ("GROQ_API_KEY", "GEMINI_API_KEY", "TAVILY_API_KEY") if not os.getenv(k, "").strip()]
     if missing:
         logger.warning("Missing API keys: %s — dependent models/features will be skipped.", ", ".join(missing))
-    logger.info("Models: smart=%s coder=%s fast=%s gemini=%s",
-                config.SMART, config.CODER, config.FAST, config.GEMINI)
+    logger.info("Models: smart=%s coder=%s fast=%s gemini=%s nvidia=%s",
+                config.SMART, config.CODER, config.FAST, config.GEMINI,
+                config.NVIDIA or "(off — no NVIDIA_API_KEY)")
     # Background thread — the server starts accepting requests immediately.
     embeddings.warm_up_in_background()
     yield

@@ -57,6 +57,7 @@ async def list_models():
         config.SMART:  "Deepest reasoning",
         config.CODER:  "Code & fast answers",
         config.GEMINI: "Google · long context",
+        config.NVIDIA: "NVIDIA · large reasoning model",
         config.FAST:   "Lowest latency",
     }
     return {

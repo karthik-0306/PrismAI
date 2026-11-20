@@ -11,6 +11,8 @@ services:
         sync: false
       - key: TAVILY_API_KEY
         sync: false
+      - key: NVIDIA_API_KEY
+        sync: false   # optional — adds Nemotron 3 Ultra as a last-resort fallback model
       - key: HF_TOKEN
         sync: false
       - key: FRONTEND_URL

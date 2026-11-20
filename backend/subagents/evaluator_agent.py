@@ -46,6 +46,17 @@ _PAIR_RE = re.compile(
 _LAST_ANSWER_RE = re.compile(r"(?i)\b(your|the|that|this)\s+(last|previous|above)?\s*(answer|response|reply)\b")
 
 
+def has_evaluation_payload(message: str) -> bool:
+    """
+    True if the message gives the judges something to score: a query/response
+    pair, a reference to the previous answer, code, or a substantial pasted text.
+    "Compare and evaluate Python vs Go" has none — it is a question to answer,
+    and sending it to the judge panel produced a meaningless score report.
+    """
+    return bool(_PAIR_RE.search(message) or _LAST_ANSWER_RE.search(message)
+                or "```" in message or len(message) >= 300)
+
+
 class EvaluatorSubagent:
     def __init__(self):
         self._llm = LLMClient()

@@ -5,6 +5,7 @@ test gets a fresh temporary SQLite database. No network, no API keys needed.
     python -m pytest backend/tests -q
 """
 
+import asyncio
 import json
 import os
 import tempfile
@@ -34,6 +35,8 @@ class FakeLLM:
       fail          {model: exception or callable(call) -> exception|None}
       midstream_fail {model: exception} — raise after the first streamed chunk
       answer        callable(call) -> str for user-facing answers
+      finish        {model: finish_reason} reported with the answer (e.g. "length")
+      hang          set of models whose streams never send a chunk
     """
 
     def __init__(self):
@@ -42,6 +45,8 @@ class FakeLLM:
         self.fail = {}
         self.midstream_fail = {}
         self.answer = lambda call: f"answer #{len(self.answer_calls())}"
+        self.finish = {}
+        self.hang = set()
 
     # ── helpers for assertions ───────────────────────────────────────────────
     @staticmethod
@@ -97,16 +102,22 @@ class FakeLLM:
         if call["stream"]:
             return self._stream(text, model)
         return SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content=text))],
+            choices=[SimpleNamespace(message=SimpleNamespace(content=text),
+                                     finish_reason=self.finish.get(model, "stop"))],
             usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5),
         )
 
     async def _stream(self, text, model):
+        if model in self.hang:
+            await asyncio.sleep(3600)
         pieces = [text[i:i + 5] for i in range(0, len(text), 5)] or [""]
         for i, piece in enumerate(pieces):
             if i == 1 and model in self.midstream_fail:
                 raise self.midstream_fail[model]
-            yield SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content=piece))])
+            last = i == len(pieces) - 1
+            yield SimpleNamespace(choices=[SimpleNamespace(
+                delta=SimpleNamespace(content=piece),
+                finish_reason=self.finish.get(model, "stop") if last else None)])
 
 
 def rate_limit(model="m"):

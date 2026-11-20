@@ -47,7 +47,7 @@ flowchart TD
         DSA["DSA Subagent\nAlgorithm Expert\nComplexity Analysis\nStep-by-Step Solutions"]
         WS["WebSearch Subagent\nTavily API — Real-time Data\nAuto Query Broadening\nSource-Cited Synthesis"]
         EV["Evaluator Subagent\nAI Judge Panel\nFactuality · Relevance\nGroundedness Scoring"]
-        LLM["Orchestrator LLM\nGPT-OSS 120B / Qwen 3.8 27B\nGPT-OSS 20B / Gemini Flash\n(via LiteLLM, health-aware fallback)"]
+        LLM["Orchestrator LLM\nGPT-OSS 120B / Qwen 3.8 27B\nGPT-OSS 20B / Gemini Flash-Lite\nNemotron 3 Ultra (optional)\n(via LiteLLM, health-aware fallback)"]
     end
 
     DSA --> JD
@@ -191,7 +191,7 @@ An interactive built-in dashboard (powered by **Recharts**) showing:
 | **Charts** | Recharts | Analytics dashboard |
 | **Backend** | FastAPI (Python 3.11) | API server, SSE streaming |
 | **LLM Gateway** | LiteLLM | Universal multi-provider LLM abstraction |
-| **LLM Providers** | Groq, Gemini | Model inference |
+| **LLM Providers** | Groq, Gemini, NVIDIA NIM (optional) | Model inference |
 | **Web Search** | Tavily API | AI-optimised real-time search |
 | **Embeddings** | Gemini embedding API (optional local sentence-transformers) | Rewriter meaning-preservation check |
 | **Database** | SQLite + aiosqlite | Async persistent storage |
@@ -291,6 +291,7 @@ Edit `.env` with your API keys:
 GEMINI_API_KEY=your_gemini_key
 GROQ_API_KEY=your_groq_key
 TAVILY_API_KEY=your_tavily_key
+NVIDIA_API_KEY=nvapi-...   # optional, from build.nvidia.com
 ```
 
 ### 3. Start the backend
@@ -342,7 +343,7 @@ PrismAI uses a split-stack deployment:
 | **Backend** | Render | [prismai-backend-mruh.onrender.com](https://prismai-backend-mruh.onrender.com) |
 
 **Environment variables required on Render:**
-`GEMINI_API_KEY`, `GROQ_API_KEY`, `TAVILY_API_KEY`, `FRONTEND_URL` (your Vercel URL; comma-separate several to allow CORS). Optional: `PRISMAI_MODEL_*`, `PRISMAI_EMBEDDINGS` (`gemini` default / `local` / `off`), `PRISMAI_DB_PATH`, `PRISMAI_CORS_ORIGIN_REGEX`.
+`GEMINI_API_KEY`, `GROQ_API_KEY`, `TAVILY_API_KEY`, optional `NVIDIA_API_KEY`, `FRONTEND_URL` (your Vercel URL; comma-separate several to allow CORS). Optional: `PRISMAI_MODEL_*`, `PRISMAI_EMBEDDINGS` (`gemini` default / `local` / `off`), `PRISMAI_DB_PATH`, `PRISMAI_CORS_ORIGIN_REGEX`.
 
 > Render's free tier has no persistent disk, so the SQLite database is wiped on every restart or deploy. The app tolerates this (stale chat ids are re-created), but history won't survive restarts there — attach a disk and point `PRISMAI_DB_PATH` at it to keep history.
 
@@ -355,7 +356,7 @@ PrismAI uses a split-stack deployment:
 | Metric | Value |
 |---|---|
 | Intent categories | 9 |
-| LLM providers | 2 (Groq, Gemini) |
+| LLM providers | 3 (Groq, Gemini, NVIDIA NIM — optional) |
 | Available models | 4 |
 | Avg token reduction (Query Rewriter, v1 prompt) | **16.92%** |
 | Evaluation dataset | 100 queries |

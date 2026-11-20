@@ -77,12 +77,12 @@ def test_rate_limited_primary_falls_back_and_is_then_skipped(api, fake_llm):
     fake_llm.fail = {primary: rate_limit()}
     sid = new_session()
 
-    events, text = stream_chat(api, session_id=sid, message="hello there")
+    events, text = stream_chat(api, session_id=sid, message="explain how tides work")
     assert text.startswith("answer")
     assert event(events, "metadata")["models_used"][0] != primary
 
     attempts_before = sum(1 for c in fake_llm.calls if c["model"] == primary)
-    stream_chat(api, session_id=sid, message="again")
+    stream_chat(api, session_id=sid, message="and why are there two a day?")
     attempts_after = sum(1 for c in fake_llm.calls if c["model"] == primary)
     assert attempts_after == attempts_before, "cooling model should not be retried immediately"
 
@@ -298,3 +298,69 @@ def test_long_chats_get_summarized_and_keep_recent_turns(fake_llm, db_path):
     turns = history[1:]
     assert turns and turns[0]["role"] == "user" and turns[-1]["role"] == "assistant"
     assert turns[-1]["content"].startswith("message 11")
+
+
+# ── Nov 2026 audit: rate-limit pressure, stalls, truncation, manual mode ─────
+
+def test_answer_allowance_depends_on_route(api, fake_llm):
+    fake_llm.route_tasks = [{"category": "general", "query": "explain tides"}]
+    stream_chat(api, session_id=new_session(), message="explain tides")
+    fake_llm.route_tasks = [{"category": "coding", "query": "write a FastAPI app"}]
+    stream_chat(api, session_id=new_session(), message="write a FastAPI app")
+    general, coding = [c["kwargs"]["max_tokens"] for c in fake_llm.answer_calls()]
+    assert general == config.ANSWER_MAX_TOKENS and coding == config.LONG_ANSWER_MAX_TOKENS
+
+
+def test_empty_reply_from_tiny_budget_does_not_bench_the_model(api, fake_llm):
+    # A reasoning model that spends a small budget thinking returns "" with
+    # finish_reason=length. That used to put it on cooldown, so the user's next
+    # manual pick of that model was silently answered by another one.
+    starved = config.UTILITY_CHAIN[0]
+    real_answer = fake_llm.answer
+    fake_llm.answer = lambda call: "" if call["model"] == starved and not call["stream"] else real_answer(call)
+    fake_llm.finish = {starved: "length"}
+    from backend.llm import client as llm_client
+    from backend.llm.client import LLMClient
+    asyncio.run(LLMClient().complete([starved, config.FAST], [{"role": "user", "content": "x"}], max_tokens=24))
+    assert llm_client.get_health(starved).cooldown_until == 0
+
+
+def test_manual_model_waits_through_a_short_rate_limit(api, fake_llm):
+    from backend.llm import client as llm_client
+    import time
+    llm_client.get_health(config.CODER).cooldown_until = time.monotonic() + 0.3
+    events, _ = stream_chat(api, session_id=new_session(), message="hi", model_preference=config.CODER)
+    assert event(events, "metadata")["models_used"] == [config.CODER]
+
+
+def test_manual_model_that_is_down_says_so_and_falls_back(api, fake_llm):
+    fake_llm.fail = {config.CODER: denied()}
+    events, text = stream_chat(api, session_id=new_session(), message="hi", model_preference=config.CODER)
+    assert text.startswith("answer")
+    assert event(events, "metadata")["models_used"] != [config.CODER]
+    labels = [e["label"] for e in events if e["type"] == "status"]
+    assert any("Qwen" in label or config.model_label(config.CODER) in label for label in labels)
+
+
+def test_stalled_stream_falls_back_instead_of_freezing(api, fake_llm, monkeypatch):
+    monkeypatch.setattr(config, "STREAM_FIRST_CHUNK_TIMEOUT_S", 0.2)
+    primary = config.ROUTE_CHAINS["general"][0]
+    fake_llm.hang = {primary}
+    events, text = stream_chat(api, session_id=new_session(), message="explain tides")
+    assert text.startswith("answer")
+    assert event(events, "metadata")["models_used"][0] != primary
+
+
+def test_cut_off_answer_is_labelled(api, fake_llm):
+    fake_llm.finish = {m: "length" for m in config.ALL_MODELS}
+    events, text = stream_chat(api, session_id=new_session(), message="explain tides")
+    assert text.startswith("answer") and "continue" in text
+    assert event(events, "metadata") is not None
+
+
+def test_rate_budget_shrinking_never_goes_below_the_floor():
+    from backend.llm.client import _fit_to_budget
+    exc = Exception("Limit 8000, Used 4000, Requested 6000. Please try again in 9s")
+    # prompt = 6000 - 4096 = 1904 → 8000 - 4000 - 1904 - 64 = 2032 tokens would fit
+    assert _fit_to_budget(exc, 4096) == 2032                   # utility calls: shrink is fine
+    assert _fit_to_budget(exc, 4096, min_tokens=3072) is None  # answers: fall back instead

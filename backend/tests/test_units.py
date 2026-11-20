@@ -57,8 +57,14 @@ def test_router_parsing_variants():
     assert r._parse('[{"category":"weird","sub_query":"y"}]', "orig") == [{"category": "general", "sub_query": "y"}]
     assert r._parse("garbage", "orig") == [{"category": "general", "sub_query": "orig"}]
     # evaluate payloads are never split
-    assert r._parse('{"tasks":[{"category":"evaluate","query":"a"},{"category":"dsa","query":"b"}]}', "orig") == \
-        [{"category": "evaluate", "sub_query": "orig"}]
+    pair = "Query: what is 2+2? Response: 5. Also explain BFS."
+    assert r._parse('{"tasks":[{"category":"evaluate","query":"a"},{"category":"dsa","query":"b"}]}', pair) == \
+        [{"category": "evaluate", "sub_query": pair}]
+    # nothing to judge → it's a question to answer, not an evaluation
+    assert r._parse('{"tasks":[{"category":"evaluate","query":"Python vs Go"}]}',
+                    "Compare and evaluate Python vs Go") == [{"category": "general", "sub_query": "Python vs Go"}]
+    assert r._parse('{"tasks":[{"category":"evaluate","query":"x"}]}',
+                    "evaluate your last answer")[0]["category"] == "evaluate"
     # same-category tasks merge
     merged = r._parse('{"tasks":[{"category":"math","query":"1+1"},{"category":"math","query":"2+2"}]}', "o")
     assert len(merged) == 1 and "1+1" in merged[0]["sub_query"] and "2+2" in merged[0]["sub_query"]
@@ -117,3 +123,10 @@ def test_rewriter_accepts_and_rejects_by_similarity(monkeypatch):
     assert not ok.fallback_used and ok.rewritten_query == short and ok.reduction_pct > 0
     assert asyncio.run(sim(0.85)).fallback_used
     assert asyncio.run(sim(None)).fallback_used   # backend unavailable → never trust the rewrite
+
+
+def test_model_chains_never_contain_unconfigured_models():
+    from backend import config
+    chains = [config.ALL_MODELS, config.UTILITY_CHAIN, config.JUDGE_PANEL, *config.ROUTE_CHAINS.values()]
+    assert all(m and isinstance(m, str) for chain in chains for m in chain)
+    assert all(len(chain) == len(set(chain)) for chain in chains)

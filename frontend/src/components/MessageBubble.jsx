@@ -35,8 +35,10 @@ function shortModelName(full) {
   return part
     .replace(/-instant$/, '')
     .replace(/-versatile$/, '')
-    .replace(/(\d)b$/, (_, n) => `${n}B`)
-    .split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+    .replace(/-a\d+b$/, '')            // MoE active-parameter suffix, e.g. nemotron-…-550b-a55b
+    .split('-')
+    .map(w => /^\d+b$/.test(w) ? w.toUpperCase() : w.charAt(0).toUpperCase() + w.slice(1))
+    .join(' ');
 }
 
 /* ── Timestamp ──────────────────────────────────────────────────────── */

@@ -23,6 +23,7 @@ from typing import List
 
 from backend import config
 from backend.llm.client import LLMClient
+from backend.subagents.evaluator_agent import has_evaluation_payload
 
 logger = logging.getLogger(__name__)
 
@@ -43,12 +44,12 @@ You route queries for a multi-agent AI assistant. Classify the LATEST user messa
 
 Categories:
 - web_search: needs current/real-time info (news, prices, weather, scores, releases, "latest", "today", "now", events after 2024) or the user asks to search/look up online.
-- dsa: data structures, algorithms, Big-O, LeetCode-style problems (even if code is requested).
-- coding: real-world software work — apps, APIs, debugging, frameworks, DevOps, system design, SQL.
+- dsa: data structures & algorithms — named algorithms (Dijkstra, BFS, DP, sorting…), trees, graphs, heaps, Big-O, LeetCode-style problems. Explaining or implementing them, in any language, is dsa.
+- coding: real-world software work — apps, APIs, debugging, frameworks, DevOps, system design, SQL — not centered on a classic algorithm.
 - math: calculation, algebra, calculus, statistics, probability, proofs.
 - reasoning: logic puzzles, riddles, argument analysis, step-by-step deduction.
 - summarize: shorten/condense a GIVEN text (the whole text is one task).
-- evaluate: score/grade/rate/critique a GIVEN response, text or code.
+- evaluate: ONLY when the message supplies (or points to the previous) response, text or code to score/grade/critique. Comparing options ("X vs Y", "which is better") is NOT evaluate.
 - fast: greetings, thanks, trivial facts, definitions, unit conversions.
 - general: everything else (explanations, advice, writing, chit-chat, opinions).
 
@@ -115,13 +116,15 @@ class SmartRouter:
             logger.warning("Router returned unparseable output: %r", raw[:200])
             return self._fallback(query)
 
+        # The judge panel needs something to judge; without it the message is a question.
+        can_evaluate = has_evaluation_payload(query)
         tasks: List[dict] = []
         for item in data:
             if not isinstance(item, dict):
                 continue
             category = str(item.get("category", "")).strip().lower()
             sub_query = str(item.get("query") or item.get("sub_query") or "").strip()
-            if category not in VALID_CATEGORIES:
+            if category not in VALID_CATEGORIES or (category == "evaluate" and not can_evaluate):
                 category = "general"
             if not sub_query:
                 continue

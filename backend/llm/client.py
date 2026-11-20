@@ -24,6 +24,8 @@ Streaming contract (stream()):
     yields ("token", text)   — a visible text chunk
     yields ("reset", None)   — the model failed mid-answer; discard text so far,
                                a fallback model is starting over
+    yields ("status", label) — progress note for the user (waiting / switching model)
+    yields ("truncated", None) — the answer hit max_tokens and is cut off
     yields ("done",  model)  — finished; `model` is the one that produced the answer
 """
 
@@ -56,6 +58,14 @@ class LLMError(Exception):
         super().__init__(message)
         self.model = model
         self.original = original
+
+
+class _BudgetStarved(LLMError):
+    """
+    Empty output because max_tokens ran out (a reasoning model spent the whole
+    budget thinking). That says nothing about the model's health, so it must not
+    put the model on cooldown — the next model in the chain simply takes over.
+    """
 
 
 @dataclass
@@ -184,12 +194,15 @@ def _cooldown_for(exc: Exception) -> float:
 MIN_USEFUL_MAX_TOKENS = 768
 
 
-def _fit_to_budget(exc: Exception, max_tokens: int) -> Optional[int]:
+def _fit_to_budget(exc: Exception, max_tokens: int, min_tokens: int = MIN_USEFUL_MAX_TOKENS) -> Optional[int]:
     """
     Groq counts the *requested* max_tokens against the per-minute token budget, so
     a "rate limited" model often still has thousands of tokens free — just not the
     full reservation. Parse "Limit L, Used U, Requested R" and return a smaller
-    max_tokens that fits what's left, or None if nothing useful fits.
+    max_tokens that fits what's left, or None if fewer than `min_tokens` fit.
+
+    `min_tokens` matters for answers: shrinking a 4096 allowance to ~950 used to
+    cut long answers off mid-sentence. Falling back to another model is better.
     """
     m = _TPM_RE.search(str(exc))
     if not m:
@@ -197,7 +210,7 @@ def _fit_to_budget(exc: Exception, max_tokens: int) -> Optional[int]:
     limit, used, requested = (int(g) for g in m.groups())
     prompt_tokens = max(0, requested - max_tokens)
     fitted = limit - used - prompt_tokens - 64
-    if fitted >= MIN_USEFUL_MAX_TOKENS and fitted < max_tokens:
+    if fitted >= min_tokens and fitted < max_tokens:
         return fitted
     return None
 
@@ -216,9 +229,10 @@ def _order_chain(models: List[str]) -> List[str]:
     return ready + cooling
 
 
-async def _wait_if_cooling(model: str, force: bool = False) -> bool:
+def _planned_wait(model: str, force: bool = False) -> Optional[float]:
     """
-    Decide whether to call a model that may be cooling down.
+    Decide whether to call a model that may be cooling down. Returns the seconds
+    to wait before calling it (0 = call now), or None to skip it.
 
     - Ready → call it.
     - Rate-limited for a short while → wait it out (better than failing).
@@ -229,12 +243,25 @@ async def _wait_if_cooling(model: str, force: bool = False) -> bool:
     """
     remaining = get_health(model).cooldown_until - time.monotonic()
     if remaining <= 0:
-        return True
+        return 0.0
     if remaining <= MAX_WAIT_FOR_RATE_S or (force and remaining <= MAX_FORCED_WAIT_S):
-        logger.info("Models busy — waiting %.1fs for %s", remaining, model)
-        await asyncio.sleep(remaining)
-        return True
-    return force
+        return remaining
+    return 0.0 if force else None
+
+
+async def _wait_if_cooling(model: str, force: bool = False) -> bool:
+    wait = _planned_wait(model, force)
+    if wait is None:
+        return False
+    if wait > 0:
+        logger.info("Models busy — waiting %.1fs for %s", wait, model)
+        await asyncio.sleep(wait)
+    return True
+
+
+def _call_timeout(max_tokens: int) -> float:
+    """Non-streaming timeout: short utility calls must not hang for a full minute."""
+    return min(config.LLM_TIMEOUT_S, 20.0 + max_tokens / 50.0)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -255,21 +282,19 @@ def _reasoning_effort_for(model: str) -> str:
     return "low"
 
 
-def _temperature_for(model: str, requested: float) -> float:
-    # Gemini 3+ degrades (and LiteLLM warns about loops) below temperature 1.0.
-    return 1.0 if "gemini" in model else requested
-
-
 def _build_kwargs(model: str, messages: list, temperature: float, max_tokens: int,
-                  low_reasoning: bool, json_mode: bool) -> dict:
+                  low_reasoning: bool, json_mode: bool, timeout: Optional[float] = None) -> dict:
     kwargs = {
         "model": model,
         "messages": messages,
-        "temperature": _temperature_for(model, temperature),
         "max_tokens": max_tokens,
-        "timeout": config.LLM_TIMEOUT_S,
+        "timeout": timeout or config.LLM_TIMEOUT_S,
         "num_retries": 0,   # we handle fallback ourselves
     }
+    # Gemini 3+ is tuned for its default temperature (1.0); Google is deprecating
+    # the parameter, and sending it only produces a warning on every call.
+    if "gemini" not in model:
+        kwargs["temperature"] = temperature
     if low_reasoning:
         kwargs["reasoning_effort"] = _reasoning_effort_for(model)
     if json_mode:
@@ -371,7 +396,8 @@ class LLMClient:
                         try:
                             logger.info("LLM call: %s (%d messages, max_tokens=%d)", model, len(messages), budget)
                             response = await litellm.acompletion(
-                                **_build_kwargs(model, messages, temperature, budget, low_reasoning, json_mode)
+                                **_build_kwargs(model, messages, temperature, budget, low_reasoning, json_mode,
+                                                timeout=_call_timeout(budget))
                             )
                             break
                         except Exception as e:
@@ -382,8 +408,11 @@ class LLMClient:
                             logger.info("LLM %s: shrinking max_tokens %d → %d to fit rate budget", model, budget, fitted)
                             budget = fitted
 
-                    content = strip_think_tags(response.choices[0].message.content or "")
+                    choice = response.choices[0]
+                    content = strip_think_tags(choice.message.content or "")
                     if not content:
+                        if getattr(choice, "finish_reason", None) == "length":
+                            raise _BudgetStarved(f"{model} used all {budget} tokens before answering", model=model)
                         raise LLMError(f"{model} returned an empty response", model=model)
 
                     latency = int((time.monotonic() - t0) * 1000)
@@ -399,6 +428,9 @@ class LLMClient:
                         completion_tokens=completion_tokens,
                         total_tokens=prompt_tokens + completion_tokens,
                     )
+                except _BudgetStarved as e:
+                    last_error = e
+                    logger.info("LLM %s — trying next model", e)
                 except Exception as e:
                     last_error = e
                     _mark_failed(model, e)
@@ -413,35 +445,76 @@ class LLMClient:
         temperature: float = 0.7,
         max_tokens: int = 4096,
         low_reasoning: bool = False,
+        min_tokens: Optional[int] = None,
+        pin_first: bool = False,
     ) -> AsyncIterator[Tuple[str, Optional[str]]]:
-        """Stream from the first model in the chain that works. See module docstring."""
+        """
+        Stream from the first model in the chain that works. See module docstring.
+
+        min_tokens: never shrink the allowance below this to squeeze under a rate
+                    limit (default: 3/4 of max_tokens) — fall back instead.
+        pin_first:  the first model was chosen by the user. Keep it first even if
+                    it is briefly rate limited (wait for it), and say so when
+                    another model has to answer instead.
+        """
         last_error: Optional[Exception] = None
         last_model = models[0] if models else ""
+        floor = min_tokens if min_tokens is not None else max(MIN_USEFUL_MAX_TOKENS, int(max_tokens * 0.75))
 
         for round_no in range(2):
-            if round_no == 1 and not await _wait_for_rate_limit_round(models, last_error):
-                break
-            chain = _order_chain(models)
+            if round_no == 1:
+                wait = _rate_limit_round_wait(models, last_error)
+                if wait is None:
+                    break
+                if wait > 1:
+                    yield "status", f"All models are busy — retrying in {wait:.0f}s…"
+                await _sleep_round(wait)
+            if pin_first and models:
+                chain = [models[0]] + [m for m in _order_chain(models) if m != models[0]]
+            else:
+                chain = _order_chain(models)
             attempted = False
             for i, model in enumerate(chain):
-                if not await _wait_if_cooling(model, force=not attempted and i == 0):
+                pinned = pin_first and i == 0
+                if pinned:
+                    # Wait for the user's model through a short rate limit, but not
+                    # through a long outage (dead key, exhausted daily quota).
+                    remaining = get_health(model).cooldown_until - time.monotonic()
+                    wait = max(0.0, remaining) if remaining <= MAX_FORCED_WAIT_S else None
+                else:
+                    wait = _planned_wait(model, force=not attempted and i == 0)
+                if wait is None:
+                    if pinned:
+                        yield "status", f"{config.model_label(model)} is unavailable right now — using another model…"
                     continue
+                if wait > 1:
+                    yield "status", f"{config.model_label(model)} is busy — retrying in {wait:.0f}s…"
+                if wait > 0:
+                    logger.info("Models busy — waiting %.1fs for %s", wait, model)
+                    await asyncio.sleep(wait)
                 attempted = True
                 last_model = model
                 emitted = False
+                finish_reason = None
                 budget, shrinks = max_tokens, 0
                 t0 = time.monotonic()
+                # One deadline covers opening the stream AND its first chunk.
+                first_deadline = t0 + config.STREAM_FIRST_CHUNK_TIMEOUT_S
+                response = None
                 try:
                     while True:
                         try:
                             logger.info("LLM stream: %s (%d messages, max_tokens=%d)", model, len(messages), budget)
-                            response = await litellm.acompletion(
-                                stream=True,
-                                **_build_kwargs(model, messages, temperature, budget, low_reasoning, False),
+                            response = await asyncio.wait_for(
+                                litellm.acompletion(
+                                    stream=True,
+                                    **_build_kwargs(model, messages, temperature, budget, low_reasoning, False),
+                                ),
+                                timeout=max(1.0, first_deadline - time.monotonic()),
                             )
                             break
                         except Exception as e:
-                            fitted = _fit_to_budget(e, budget)
+                            fitted = _fit_to_budget(e, budget, floor)
                             if not fitted or shrinks >= 3:
                                 raise
                             shrinks += 1
@@ -450,9 +523,21 @@ class LLMClient:
 
                     yield "model", model
                     think = _ThinkFilter()
-                    async for chunk in response:
+                    chunks = response.__aiter__()
+                    first = True
+                    while True:
+                        limit = (max(1.0, first_deadline - time.monotonic()) if first
+                                 else config.STREAM_STALL_TIMEOUT_S)
+                        try:
+                            chunk = await asyncio.wait_for(chunks.__anext__(), timeout=limit)
+                        except StopAsyncIteration:
+                            break
+                        except asyncio.TimeoutError:
+                            raise LLMError(f"{model} stalled — no data for {limit:.0f}s", model=model)
+                        first = False
                         if not chunk.choices:
                             continue
+                        finish_reason = getattr(chunk.choices[0], "finish_reason", None) or finish_reason
                         piece = chunk.choices[0].delta.content or ""
                         if not piece:
                             continue
@@ -469,21 +554,60 @@ class LLMClient:
                         emitted = True
                         yield "token", tail
                     if not emitted:
+                        if finish_reason == "length":
+                            raise _BudgetStarved(f"{model} used all {budget} tokens before answering", model=model)
                         raise LLMError(f"{model} streamed an empty response", model=model)
 
                     _mark_ok(model, int((time.monotonic() - t0) * 1000))
+                    if finish_reason == "length":
+                        logger.warning("LLM %s: answer hit max_tokens=%d and is cut off", model, budget)
+                        yield "truncated", None
                     yield "done", model
                     return
                 except (asyncio.CancelledError, GeneratorExit):
                     raise   # client went away — not the model's fault
                 except Exception as e:
                     last_error = e
-                    _mark_failed(model, e)
-                    logger.warning("LLM stream failed: %s — %s", model, _short_error(e))
+                    if isinstance(e, _BudgetStarved):
+                        logger.info("LLM %s — trying next model", e)
+                    else:
+                        _mark_failed(model, e)
+                        logger.warning("LLM stream failed: %s — %s", model, _short_error(e))
+                    await _close_quietly(response)
                     if emitted:
                         yield "reset", None
+                    if i + 1 < len(chain):
+                        yield "status", f"{config.model_label(model)} is unavailable — switching models…"
 
         raise LLMError(_friendly_error(last_error), model=last_model, original=last_error)
+
+
+async def _close_quietly(response) -> None:
+    """Release an abandoned stream's connection (best effort)."""
+    close = getattr(response, "aclose", None)
+    if close is None:
+        return
+    try:
+        await close()
+    except Exception:
+        pass
+
+
+def _rate_limit_round_wait(models: List[str], last_error: Optional[Exception]) -> Optional[float]:
+    """Seconds to wait before one more pass over the chain, or None to give up."""
+    if not _is_rate_limit(last_error):
+        return None
+    now = time.monotonic()
+    soonest = min((get_health(m).cooldown_until for m in models), default=now) - now
+    if soonest > MAX_FORCED_WAIT_S:
+        return None
+    return max(0.0, soonest)
+
+
+async def _sleep_round(wait: float) -> None:
+    if wait > 0:
+        logger.info("All models rate limited — waiting %.1fs before one more pass", wait)
+        await asyncio.sleep(wait)
 
 
 async def _wait_for_rate_limit_round(models: List[str], last_error: Optional[Exception]) -> bool:
@@ -492,15 +616,10 @@ async def _wait_for_rate_limit_round(models: List[str], last_error: Optional[Exc
     limit and some model frees up within MAX_FORCED_WAIT_S, wait for it and allow
     one more pass. Users would rather see a few extra seconds of "Thinking…" than an error.
     """
-    if not _is_rate_limit(last_error):
+    wait = _rate_limit_round_wait(models, last_error)
+    if wait is None:
         return False
-    now = time.monotonic()
-    soonest = min((get_health(m).cooldown_until for m in models), default=now) - now
-    if soonest > MAX_FORCED_WAIT_S:
-        return False
-    if soonest > 0:
-        logger.info("All models rate limited — waiting %.1fs before one more pass", soonest)
-        await asyncio.sleep(soonest)
+    await _sleep_round(wait)
     return True
 
 
@@ -510,7 +629,7 @@ def _friendly_error(exc: Optional[Exception]) -> str:
         return "No AI model is currently available. Please try again in a minute."
     if isinstance(exc, litellm.RateLimitError) or getattr(exc, "status_code", None) == 429:
         return "All AI models are busy (free-tier rate limit reached). Please wait a few seconds and try again."
-    if isinstance(exc, (litellm.Timeout, asyncio.TimeoutError)):
+    if isinstance(exc, (litellm.Timeout, asyncio.TimeoutError)) or "stalled" in str(exc):
         return "The AI models took too long to respond. Please try again."
     if isinstance(exc, litellm.ContextWindowExceededError):
         return "This message is too long for the available models. Try shortening it."

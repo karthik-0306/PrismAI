@@ -74,6 +74,10 @@ STATUS_LABELS = {
     "combining":  "Combining the answers…",
 }
 
+# Appended when an answer hits its token allowance, so a cut-off answer is never
+# mistaken for a complete one. "continue" then resumes it from the history.
+TRUNCATION_NOTE = "\n\n*— Reached the length limit. Reply **continue** for the rest.*"
+
 
 def _spawn(coro) -> None:
     task = asyncio.get_running_loop().create_task(coro)
@@ -192,7 +196,8 @@ class Orchestrator:
             if model_preference and model_preference != "auto":
                 chain = [model_preference] + [m for m in config.ALL_MODELS if m != model_preference]
                 yield _status("thinking")
-                async for event in self._stream_llm(chain, MemoryInjector.build_prompt(history, query), answer):
+                async for event in self._stream_llm(chain, MemoryInjector.build_prompt(history, query), answer,
+                                                    max_tokens=config.LONG_ANSWER_MAX_TOKENS, pin_first=True):
                     yield event
 
             # ── 4b. Auto mode ───────────────────────────────────────────────
@@ -275,7 +280,8 @@ class Orchestrator:
             if sources:
                 yield {"type": "sources", "sources": sources}
             yield _status("thinking", "Reading the results…")
-            async for event in self._stream_llm(_web_searcher.chain, messages, answer):
+            async for event in self._stream_llm(_web_searcher.chain, messages, answer,
+                                                max_tokens=config.answer_max_tokens(category)):
                 yield event
             return
 
@@ -286,7 +292,8 @@ class Orchestrator:
             messages = MemoryInjector.build_prompt(history, query)
             chain = config.ROUTE_CHAINS.get(category, config.ROUTE_CHAINS["general"])
         # Quick questions don't benefit from deep thinking — it only delays the first token.
-        async for event in self._stream_llm(chain, messages, answer, low_reasoning=category == "fast"):
+        async for event in self._stream_llm(chain, messages, answer, max_tokens=config.answer_max_tokens(category),
+                                            low_reasoning=category == "fast"):
             yield event
 
     async def _stream_compound(self, tasks: List[dict], query: str, history: List[dict], answer: _Answer):
@@ -331,7 +338,7 @@ class Orchestrator:
                 [{"role": "system", "content": "You merge expert answers into one clear, well-formatted reply."},
                  {"role": "user", "content": prompt}],
                 aggregator,
-                max_tokens=config.ANSWER_MAX_TOKENS,
+                max_tokens=config.LONG_ANSWER_MAX_TOKENS,
             ):
                 yield event
             answer.text = aggregator.text
@@ -367,14 +374,14 @@ class Orchestrator:
             return report, (models[0] if models else "evaluator"), []
         if category == "web_search":
             messages, sources = await _web_searcher.prepare(sub_query, history)
-            result = await _llm.complete(_web_searcher.chain, messages, max_tokens=config.ANSWER_MAX_TOKENS)
+            result = await _llm.complete(_web_searcher.chain, messages, max_tokens=config.answer_max_tokens(category))
             return result.content, result.model_used, sources
         if category == "dsa":
             messages, chain = _dsa_agent.build_messages(sub_query, history), _dsa_agent.chain
         else:
             messages = MemoryInjector.build_prompt(history, sub_query)
             chain = config.ROUTE_CHAINS.get(category, config.ROUTE_CHAINS["general"])
-        result = await _llm.complete(chain, messages, max_tokens=config.ANSWER_MAX_TOKENS)
+        result = await _llm.complete(chain, messages, max_tokens=config.answer_max_tokens(category))
         return result.content, result.model_used, []
 
     async def _judge(self, sub_query: str, response: str) -> dict:
@@ -387,7 +394,7 @@ class Orchestrator:
         )
         try:
             result = await _llm.complete(config.UTILITY_CHAIN, [{"role": "user", "content": prompt}],
-                                         temperature=0.0, max_tokens=150, low_reasoning=True, json_mode=True)
+                                         temperature=0.0, max_tokens=300, low_reasoning=True, json_mode=True)
             raw = result.content
             parsed = json.loads(raw[raw.find("{"): raw.rfind("}") + 1])
             return {"severity": max(0, min(3, int(parsed.get("severity", 0)))),
@@ -401,10 +408,17 @@ class Orchestrator:
     # ─────────────────────────────────────────────────────────────────────────
 
     async def _stream_llm(self, chain: List[str], messages: List[dict], answer: _Answer,
-                          max_tokens: int = config.ANSWER_MAX_TOKENS, low_reasoning: bool = False):
+                          max_tokens: int = config.ANSWER_MAX_TOKENS, low_reasoning: bool = False,
+                          pin_first: bool = False):
         """Forward LLMClient.stream() events, keeping `answer` in sync with what the user sees."""
-        async for kind, value in _llm.stream(chain, messages, max_tokens=max_tokens, low_reasoning=low_reasoning):
-            if kind == "model":
+        async for kind, value in _llm.stream(chain, messages, max_tokens=max_tokens, low_reasoning=low_reasoning,
+                                             pin_first=pin_first):
+            if kind == "status":
+                yield _status("waiting", value)
+            elif kind == "truncated":
+                answer.text += TRUNCATION_NOTE
+                yield {"type": "token", "content": TRUNCATION_NOTE}
+            elif kind == "model":
                 answer.streaming_model = value
             elif kind == "token":
                 answer.text += value
@@ -466,7 +480,7 @@ class Orchestrator:
                 [{"role": "user", "content":
                   "Write a short title (2-6 words, no quotes, no trailing punctuation) for a chat "
                   f"that starts with this message:\n\n{message[:1000]}"}],
-                temperature=0.3, max_tokens=24, low_reasoning=True,
+                temperature=0.3, max_tokens=160, low_reasoning=True,   # room for a reasoning model's thinking
             )
             title = result.content.strip().strip('"\'').splitlines()[0].strip().rstrip(".")[:60]
             if title:

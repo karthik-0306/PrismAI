@@ -42,13 +42,20 @@ SYSTEM_PROMPT = (
     "answers short. If you are unsure or something may be outdated, say so."
 )
 
+# The summary is rewritten every time it is refreshed, so anything a rewrite drops
+# is gone for good. In a 50-turn test the old prompt lost the user's name and
+# favourite number after a dozen rewrites (crowded out by technical detail); the
+# sticky "User facts:" line kept them through all 17 rewrites.
 SUMMARIZE_SYSTEM_PROMPT = (
     "You compress conversation history into a dense summary for an AI assistant's memory.\n"
     "- Merge the OLD SUMMARY (if any) with the NEW MESSAGES into ONE updated summary.\n"
-    "- Keep facts about the user (name, preferences, goals), topics covered, decisions, "
-    "key results, code/function names and open questions.\n"
-    "- Drop pleasantries and intermediate reasoning.\n"
-    "- Output only the summary text, at most ~250 words."
+    "- Start with a \"User facts:\" line: everything the user said about themselves (name, location, "
+    "role, preferences, numbers, goals). Copy every fact already in the OLD SUMMARY's \"User facts:\" "
+    "line even if the new messages never mention it — never drop one.\n"
+    "- Then: topics covered, decisions, key results, code/function names and open questions.\n"
+    "- Drop pleasantries and intermediate reasoning. When space is short, compress older "
+    "technical detail, never user facts.\n"
+    "- Output only the summary text, at most ~300 words."
 )
 
 # Per-message cap inside history so one giant paste can't evict everything else.
@@ -196,7 +203,7 @@ class MemoryInjector:
             messages=[{"role": "system", "content": SUMMARIZE_SYSTEM_PROMPT},
                       {"role": "user", "content": body}],
             temperature=0.3,
-            max_tokens=600,
+            max_tokens=900,   # ~300 words plus headroom; 600 cut summaries off mid-line
             low_reasoning=True,
         )
 
